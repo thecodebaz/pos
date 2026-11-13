@@ -4,7 +4,7 @@ export const dynamic = "force-static";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "POS Moçambique",
+    name: "POS Codebaz",
     short_name: "POS",
     description: "Ponto de venda offline com stock, clientes e relatórios.",
     start_url: "/",

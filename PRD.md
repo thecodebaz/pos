@@ -438,7 +438,7 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-STK-10 | Custo do produto é atualizado para o último custo de entrada; não há FIFO nem custo médio no MVP. | S |
 | RF-STK-11 | Stock negativo é mostrado com destaque no catálogo e no POS. | M |
 | RF-STK-12 | Entradas de compra podem ser registadas por pacote e convertidas para a unidade-base configurada no produto; o livro de movimentos e os saldos permanecem na unidade-base. | M |
-| RF-STK-13 | Importar Excel a partir da linha 6 (B SKU, C nome, E cor, J quantidade, K custo unitário, L valor), rever produtos novos/existentes, preços de venda em falta e taxa Rand→MZN; assinalar divergências entre K×J e L e exigir confirmação explícita; confirmar criação de produtos e movimentos de stock numa operação atómica. | M |
+| RF-STK-13 | Importar Excel a partir da linha 6 (B SKU, C nome, E cor, J quantidade, K custo unitário, L valor), rever produtos novos/existentes, preços de venda em falta, conteúdo e preços do pacote/meia embalagem e taxa Rand→MZN; assinalar divergências entre K×J e L e exigir confirmação explícita; manter o stock em unidades-base e activar as formas de venda configuradas; confirmar produtos e movimentos de stock numa operação atómica. | M |
 
 ### 9.6 Clientes
 

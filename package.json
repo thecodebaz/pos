@@ -11,6 +11,8 @@
     "build": "next build --webpack",
     "postbuild": "node scripts/fix-rsc-paths.mjs",
     "start": "node scripts/serve.mjs",
+    "pm2:start": "pm2 startOrRestart ecosystem.config.cjs --update-env",
+    "pm2:startup:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-pm2-startup.ps1",
     "typecheck": "tsc --noEmit && tsc -p workers/tsconfig.json --noEmit",
     "lint": "eslint"
   },

@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Banknote, CreditCard, Minus, PackageSearch, Plus, Search, ShoppingCart, Smartphone, Trash2, UserRound, X } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Banknote, CreditCard, Minus, PackageSearch, Plus, Search, ShoppingCart, Smartphone, Trash2, X } from "lucide-react";
 import { cn } from "cn";
 import { useApp, errorMessage } from "@/lib/app-context";
 import type { CartItemInput, Customer, PagedResult, PaymentMethod, Product, Quote, Sale, SaleUnit } from "@/lib/db/protocol";
@@ -52,7 +53,7 @@ function normalize(value: string): string {
 
 export function PosScreen() {
   const { session, call, toast } = useApp();
-  const token = session?.token ?? "";
+  const router = useRouter();
 
   const [products, setProducts] = useState<Product[]>([]);
   const [totalProducts, setTotalProducts] = useState(0);
@@ -143,14 +144,12 @@ export function PosScreen() {
   const cartKey = JSON.stringify(items) + `|${orderDiscountCents}|${applyTax}`;
 
   useEffect(() => {
-    if (items.length === 0) {
-      setQuote(null);
-      setQuoteError(null);
-      return;
-    }
+    // Com o carrinho vazio não vale a pena pedir orçamento; o total e as linhas
+    // são limpos pelos pontos que esvaziam o carrinho.
+    if (items.length === 0) return;
     const seq = ++quoteSeq.current;
-    setQuoting(true);
     const timer = window.setTimeout(() => {
+      setQuoting(true);
       call<Quote>("sale.quote", { items, orderDiscountCents, applyTax })
         .then((result) => {
           if (seq !== quoteSeq.current) return;
@@ -170,7 +169,7 @@ export function PosScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cartKey, call]);
 
-  const totalCents = quote?.totalCents ?? 0;
+  const totalCents = items.length === 0 ? 0 : (quote?.totalCents ?? 0);
   const itemCount = cart.length;
 
   const addProduct = useCallback((product: Product, saleUnit = defaultSaleUnit(product)) => {
@@ -387,7 +386,7 @@ export function PosScreen() {
           <EmptyState
             title="Sem produtos"
             description="Crie produtos no catálogo para começar a vender. Também pode importar um backup."
-            action={<Button onClick={() => { window.location.href = "/produtos/"; }}>Abrir catálogo</Button>}
+            action={<Button onClick={() => { router.push("/produtos/"); }}>Abrir catálogo</Button>}
           />
         ) : (
           <>

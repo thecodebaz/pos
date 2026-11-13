@@ -106,7 +106,7 @@ export function AuditScreen() {
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), query ? 200 : 0);
     return () => window.clearTimeout(timer);
-  }, [load]);
+  }, [load, query]);
 
   const pageCount = Math.max(1, Math.ceil(total / Number(pageSize)));
   const currentPage = Math.min(page, pageCount);

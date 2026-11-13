@@ -46,17 +46,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { boot, status, session, signOut, lock } = useApp();
   const router = useRouter();
   const pathname = usePathname();
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuOpenAt, setMenuOpenAt] = useState<string | null>(null);
+  // O menu fecha sozinho quando a rota muda: guardamos a rota em que foi aberto
+  // em vez de sincronizar estado num efeito.
+  const menuOpen = menuOpenAt === pathname;
 
   useEffect(() => {
     if (boot !== "ready") return;
     if (status?.setupRequired) router.replace("/configuracao/");
     else if (!session) router.replace("/entrar/");
   }, [boot, status, session, router]);
-
-  useEffect(() => {
-    setMenuOpen(false);
-  }, [pathname]);
 
   if (boot !== "ready") return <BootScreen />;
   if (!session) {
@@ -101,7 +100,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Button variant="ghost" size="icon" aria-label="Bloquear sessão" onClick={() => void lock()}>
               <Lock className="size-4" />
             </Button>
-            <Button variant="ghost" size="icon" aria-label="Abrir menu" onClick={() => setMenuOpen((open) => !open)}>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Abrir menu"
+              onClick={() => setMenuOpenAt((open) => (open === pathname ? null : pathname))}
+            >
               {menuOpen ? <X className="size-4" /> : <Menu className="size-4" />}
             </Button>
           </div>

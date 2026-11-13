@@ -1,14 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Database, KeyRound, Save, ShieldCheck } from "lucide-react";
+import { Database, KeyRound, Save, ShieldCheck, Trash2 } from "lucide-react";
 import { useApp, errorMessage } from "@/lib/app-context";
 import type { Settings } from "@/lib/db/protocol";
 import { formatBytes, formatDateTime } from "@/lib/format";
 import { Badge, Field, Note, PageHeader, Select } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
 
 export function SettingsScreen() {
   const { session, status, call, toast, updateSettings, refreshStatus } = useApp();
@@ -30,6 +29,16 @@ export function SettingsScreen() {
   const [pinForm, setPinForm] = useState({ current: "", next: "", confirm: "" });
   const [pinBusy, setPinBusy] = useState(false);
   const [pinError, setPinError] = useState<string | null>(null);
+
+  const [purgePin, setPurgePin] = useState("");
+  const [purgeConfirmation, setPurgeConfirmation] = useState("");
+  const [purgeConfirmed, setPurgeConfirmed] = useState(false);
+  const [purgeBusy, setPurgeBusy] = useState(false);
+  const [purgeError, setPurgeError] = useState<string | null>(null);
+  const [purgeResult, setPurgeResult] = useState<{
+    backupName: string;
+    deleted: { products: number; stockMovements: number; sales: number; auditEntries: number };
+  } | null>(null);
 
   useEffect(() => {
     void refreshStatus();
@@ -79,6 +88,30 @@ export function SettingsScreen() {
       setPinError(errorMessage(err));
     } finally {
       setPinBusy(false);
+    }
+  }
+
+  async function purgeData(event: React.FormEvent) {
+    event.preventDefault();
+    if (session?.user.role !== "owner" || purgeConfirmation !== "ELIMINAR" || purgePin.length !== 6 || !purgeConfirmed) return;
+    setPurgeBusy(true);
+    setPurgeError(null);
+    setPurgeResult(null);
+    try {
+      const result = await call<{
+        backupName: string;
+        deleted: { products: number; stockMovements: number; sales: number; auditEntries: number };
+      }>("data.purge", { pin: purgePin, confirmation: purgeConfirmation });
+      setPurgeResult(result);
+      setPurgePin("");
+      setPurgeConfirmation("");
+      setPurgeConfirmed(false);
+      await refreshStatus();
+      toast("Dados operacionais eliminados. Foi criado um backup prévio.", "success");
+    } catch (err) {
+      setPurgeError(errorMessage(err));
+    } finally {
+      setPurgeBusy(false);
     }
   }
 
@@ -208,6 +241,69 @@ export function SettingsScreen() {
             <div className="mt-3"><Badge tone="success">Dados protegidos contra limpeza automática</Badge></div>
           )}
         </div>
+
+        {session?.user.role === "owner" ? (
+          <form className="rounded-xl border border-destructive/40 bg-card p-4" onSubmit={purgeData}>
+            <p className="mb-3 flex items-center gap-2 text-sm font-semibold text-destructive">
+              <Trash2 className="size-4" /> Eliminar dados operacionais
+            </p>
+            <Note tone="danger">
+              Esta acção elimina todos os produtos, códigos de barras, stock actual e movimentos, vendas, auditoria e aprovações pendentes.
+              Definições, utilizadores, categorias, clientes, fornecedores e a sequência de recibos serão mantidos. Será criado um backup interno
+              antes da eliminação; essa cópia e os backups existentes continuam a conter os dados e podem ser restaurados.
+            </Note>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <Field label="PIN actual do proprietário" htmlFor="purgePin">
+                <Input
+                  id="purgePin"
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={6}
+                  required
+                  value={purgePin}
+                  onChange={(event) => setPurgePin(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                />
+              </Field>
+              <Field label={'Escreva "ELIMINAR" para confirmar'} htmlFor="purgeConfirmation">
+                <Input
+                  id="purgeConfirmation"
+                  required
+                  value={purgeConfirmation}
+                  onChange={(event) => setPurgeConfirmation(event.target.value.trim().toUpperCase())}
+                />
+              </Field>
+              <label className="flex items-start gap-2 text-sm sm:col-span-2">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 size-4"
+                  checked={purgeConfirmed}
+                  onChange={(event) => setPurgeConfirmed(event.target.checked)}
+                />
+                Confirmo que pretendo eliminar estes dados da base activa.
+              </label>
+            </div>
+            {purgeError ? <div className="mt-3"><Note tone="danger">{purgeError}</Note></div> : null}
+            {purgeResult ? (
+              <div className="mt-3 space-y-2 text-sm">
+                <Badge tone="success">Limpeza concluída</Badge>
+                <p>
+                  Removidos: {purgeResult.deleted.products} produtos, {purgeResult.deleted.stockMovements} movimentos,
+                  {" "}{purgeResult.deleted.sales} vendas e {purgeResult.deleted.auditEntries} registos de auditoria.
+                  Backup: {purgeResult.backupName}
+                </p>
+              </div>
+            ) : null}
+            <div className="mt-3 flex justify-end">
+              <Button
+                type="submit"
+                variant="destructive"
+                disabled={purgeBusy || !purgeConfirmed || purgeConfirmation !== "ELIMINAR" || purgePin.length !== 6}
+              >
+                <Trash2 className="size-4" /> {purgeBusy ? "A eliminar…" : "Eliminar dados"}
+              </Button>
+            </div>
+          </form>
+        ) : null}
       </div>
     </div>
   );

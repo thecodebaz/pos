@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Package, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { FileSpreadsheet, Package, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useApp, errorMessage } from "@/lib/app-context";
 import type { Category, PagedResult, Product, Unit } from "@/lib/db/protocol";
 import { UNIT_LABELS } from "@/lib/db/protocol";
@@ -52,7 +53,7 @@ const emptyForm: FormState = {
   halfPackagePrice: "",
   sellByUnit: true,
   sellByPackage: true,
-  sellByHalfPackage: true,
+  sellByHalfPackage: false,
   cost: "",
   taxRateBp: "1600",
   trackStock: true,
@@ -62,6 +63,7 @@ const emptyForm: FormState = {
 
 export function ProductsScreen() {
   const { session, call, toast } = useApp();
+  const router = useRouter();
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
@@ -97,7 +99,7 @@ export function ProductsScreen() {
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), query ? 200 : 0);
     return () => window.clearTimeout(timer);
-  }, [load]);
+  }, [load, query]);
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount);
@@ -149,10 +151,10 @@ export function ProductsScreen() {
         barcodes: form.barcodes.split(",").map((value) => value.trim()).filter(Boolean),
         categoryId: form.categoryId || null,
         unit: form.unit,
-        priceCents: parseMzn(form.price),
-        packageQtyMilli: form.packageEnabled ? parseQty(form.packageQty) : 0,
-        packagePriceCents: parseMzn(form.packagePrice),
-        halfPackagePriceCents: parseMzn(form.halfPackagePrice),
+        priceCents: !form.packageEnabled || form.sellByUnit ? parseMzn(form.price) : 0,
+        packageQtyMilli: form.packageEnabled && (form.sellByPackage || form.sellByHalfPackage) ? parseQty(form.packageQty) : 0,
+        packagePriceCents: form.packageEnabled && form.sellByPackage ? parseMzn(form.packagePrice) : 0,
+        halfPackagePriceCents: form.packageEnabled && form.sellByHalfPackage ? parseMzn(form.halfPackagePrice) : 0,
         sellByUnit: form.packageEnabled ? form.sellByUnit : true,
         sellByPackage: form.packageEnabled && form.sellByPackage,
         sellByHalfPackage: form.packageEnabled && form.sellByHalfPackage,
@@ -211,8 +213,15 @@ export function ProductsScreen() {
       {products.length === 0 ? (
         <EmptyState
           title="Ainda não há produtos"
-          description="Crie o primeiro produto para começar a vender."
-          action={canEdit ? <Button onClick={openNew}>Criar produto</Button> : undefined}
+          description="Crie o primeiro produto ou importe um Excel de stock. Produtos ainda não registados serão criados ao confirmar a importação."
+          action={canEdit ? (
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button onClick={openNew}>Criar produto</Button>
+              <Button variant="outline" onClick={() => router.push("/stock/")}>
+                <FileSpreadsheet className="size-4" /> Importar Excel
+              </Button>
+            </div>
+          ) : undefined}
         />
       ) : (
         <>
@@ -251,7 +260,7 @@ export function ProductsScreen() {
                       </TableCell>
                       <TableCell className="text-muted-foreground">{product.categoryName ?? "—"}</TableCell>
                       <TableCell className="text-right tabular-nums">
-                        <p>{formatMzn(product.priceCents)} / {product.unit}</p>
+                        {product.sellByUnit ? <p>{formatMzn(product.priceCents)} / {product.unit}</p> : null}
                         {product.sellByPackage ? <p className="text-xs text-muted-foreground">{formatMzn(product.packagePriceCents)} / pacote</p> : null}
                         {product.sellByHalfPackage ? <p className="text-xs text-muted-foreground">{formatMzn(product.halfPackagePriceCents)} / meia embalagem</p> : null}
                       </TableCell>
@@ -298,7 +307,7 @@ export function ProductsScreen() {
         <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>{form.id ? "Editar produto" : "Novo produto"}</DialogTitle>
-            <DialogDescription>Registe o preço da unidade e, para produtos em pacote, os preços da meia embalagem e do pacote. O IVA é acrescentado apenas quando activado na venda.</DialogDescription>
+            <DialogDescription>Seleccione os formatos vendidos e indique apenas os respectivos preços. O IVA é acrescentado apenas quando activado na venda.</DialogDescription>
           </DialogHeader>
           <form className="grid gap-3 sm:grid-cols-2" onSubmit={save}>
             <Field label="Nome *" htmlFor="productName" className="sm:col-span-2">
@@ -332,8 +341,17 @@ export function ProductsScreen() {
                 ))}
               </Select>
             </Field>
-            <Field label={`Preço por ${UNIT_LABELS[form.unit].toLowerCase()} (MZN) *`} htmlFor="productPrice">
-              <MoneyInput id="productPrice" value={form.price} onValueChange={(price) => setForm({ ...form, price })} />
+            <Field
+              label={`Preço por ${UNIT_LABELS[form.unit].toLowerCase()} (MZN)${form.packageEnabled && !form.sellByUnit ? " (opcional)" : " *"}`}
+              htmlFor="productPrice"
+            >
+              <MoneyInput
+                id="productPrice"
+                required={!form.packageEnabled || form.sellByUnit}
+                disabled={form.packageEnabled && !form.sellByUnit}
+                value={form.price}
+                onValueChange={(price) => setForm({ ...form, price })}
+              />
             </Field>
             <label className="flex items-center gap-2 text-sm sm:col-span-2">
               <input
@@ -342,25 +360,42 @@ export function ProductsScreen() {
                 checked={form.packageEnabled}
                 onChange={(event) => setForm({ ...form, packageEnabled: event.target.checked })}
               />
-              Este produto também é vendido em pacote
+              Configurar venda por pacote ou meia embalagem
             </label>
             {form.packageEnabled ? (
               <>
-                <Field label={`Unidades-base por pacote (${UNIT_LABELS[form.unit]}) *`} htmlFor="packageQty" hint="Ex.: 12 unidades por pacote.">
+                <Field
+                  label={`Unidades-base por pacote (${UNIT_LABELS[form.unit]})${form.sellByPackage || form.sellByHalfPackage ? " *" : ""}`}
+                  htmlFor="packageQty"
+                  hint="Ex.: 12 unidades por pacote."
+                >
                   <Input
                     id="packageQty"
-                    required
+                    required={form.sellByPackage || form.sellByHalfPackage}
+                    disabled={!form.sellByPackage && !form.sellByHalfPackage}
                     inputMode="decimal"
                     value={form.packageQty}
                     onChange={(event) => setForm({ ...form, packageQty: event.target.value })}
                   />
                 </Field>
                 <div className="grid gap-3 sm:grid-cols-2 sm:col-span-2">
-                  <Field label="Preço do pacote (MZN) *" htmlFor="packagePrice">
-                    <MoneyInput id="packagePrice" value={form.packagePrice} onValueChange={(packagePrice) => setForm({ ...form, packagePrice })} />
+                  <Field label={`Preço do pacote (MZN)${form.sellByPackage ? " *" : " (opcional)"}`} htmlFor="packagePrice">
+                    <MoneyInput
+                      id="packagePrice"
+                      required={form.sellByPackage}
+                      disabled={!form.sellByPackage}
+                      value={form.packagePrice}
+                      onValueChange={(packagePrice) => setForm({ ...form, packagePrice })}
+                    />
                   </Field>
-                  <Field label="Preço de meia embalagem (MZN) *" htmlFor="halfPackagePrice">
-                    <MoneyInput id="halfPackagePrice" value={form.halfPackagePrice} onValueChange={(halfPackagePrice) => setForm({ ...form, halfPackagePrice })} />
+                  <Field label={`Preço de meia embalagem (MZN)${form.sellByHalfPackage ? " *" : " (opcional)"}`} htmlFor="halfPackagePrice">
+                    <MoneyInput
+                      id="halfPackagePrice"
+                      required={form.sellByHalfPackage}
+                      disabled={!form.sellByHalfPackage}
+                      value={form.halfPackagePrice}
+                      onValueChange={(halfPackagePrice) => setForm({ ...form, halfPackagePrice })}
+                    />
                   </Field>
                 </div>
                 <div className="flex flex-wrap gap-x-5 gap-y-2 sm:col-span-2">

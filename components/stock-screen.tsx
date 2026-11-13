@@ -352,7 +352,7 @@ export function StockScreen() {
             <EmptyState
               title="Escolha um produto"
               description="Seleccione um produto na lista para ver o stock e os movimentos."
-              action={<Button onClick={() => { window.location.href = "/produtos/"; }}><Boxes className="size-4" /> Abrir catálogo</Button>}
+              action={<Button onClick={() => { router.push("/produtos/"); }}><Boxes className="size-4" /> Abrir catálogo</Button>}
             />
           )}
         </div>

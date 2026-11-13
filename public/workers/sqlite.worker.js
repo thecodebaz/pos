@@ -236,7 +236,9 @@ function toProduct(row) {
     };
 }
 function findStockImportProduct(sku, name, color) {
-    const matches = rows(`SELECT id, active, track_stock, unit, price_cents
+    const matches = rows(`SELECT id, active, track_stock, unit, price_cents, package_qty_milli,
+            package_price_cents, half_package_price_cents, sell_by_unit,
+            sell_by_package, sell_by_half_package
      FROM products
      WHERE deleted_at IS NULL
        AND sku = ? COLLATE NOCASE
@@ -266,8 +268,26 @@ function previewStockImport(rawItems) {
                 trackStock: toBool(product.track_stock),
                 unit: String(product.unit),
                 priceCents: Number(product.price_cents),
+                packageQtyMilli: Number(product.package_qty_milli ?? 0),
+                packagePriceCents: Number(product.package_price_cents ?? 0),
+                halfPackagePriceCents: Number(product.half_package_price_cents ?? 0),
+                sellByUnit: toBool(product.sell_by_unit),
+                sellByPackage: toBool(product.sell_by_package),
+                sellByHalfPackage: toBool(product.sell_by_half_package),
             }
-            : { productId: null, active: null, trackStock: null, unit: null, priceCents: null };
+            : {
+                productId: null,
+                active: null,
+                trackStock: null,
+                unit: null,
+                priceCents: null,
+                packageQtyMilli: 0,
+                packagePriceCents: 0,
+                halfPackagePriceCents: 0,
+                sellByUnit: false,
+                sellByPackage: false,
+                sellByHalfPackage: false,
+            };
     });
 }
 function commitStockImport(payload) {
@@ -299,6 +319,13 @@ function commitStockImport(payload) {
             const salePriceCents = raw.salePriceCents === null || raw.salePriceCents === undefined
                 ? null
                 : Math.trunc(Number(raw.salePriceCents));
+            const packageQtyMilli = Math.trunc(Number(raw.packageQtyMilli ?? 0));
+            const packagePriceCents = Math.trunc(Number(raw.packagePriceCents ?? 0));
+            const halfPackagePriceCents = Math.trunc(Number(raw.halfPackagePriceCents ?? 0));
+            const hasPackageConfig = packageQtyMilli > 0 || packagePriceCents > 0 || halfPackagePriceCents > 0;
+            const sellByUnit = raw.sellByUnit === undefined ? true : raw.sellByUnit === true;
+            const sellByPackage = raw.sellByPackage === undefined ? hasPackageConfig : raw.sellByPackage === true;
+            const sellByHalfPackage = raw.sellByHalfPackage === undefined ? hasPackageConfig : raw.sellByHalfPackage === true;
             if (!sku || sku.length > 100 || !name || name.length > 160 || !color || color.length > 60) {
                 fail("IMPORT_INVALID", "Todos os produtos precisam de SKU, nome e cor válidos.");
             }
@@ -313,6 +340,27 @@ function commitStockImport(payload) {
             if (salePriceCents !== null && (!Number.isSafeInteger(salePriceCents) || salePriceCents < 0)) {
                 fail("IMPORT_INVALID", `O preço de venda de ${sku} é inválido.`);
             }
+            if (![packageQtyMilli, packagePriceCents, halfPackagePriceCents].every(Number.isSafeInteger)
+                || packageQtyMilli < 0 || packagePriceCents < 0 || halfPackagePriceCents < 0) {
+                fail("IMPORT_INVALID", `A configuração de pacote para ${sku} é inválida.`);
+            }
+            if (!sellByUnit && !sellByPackage && !sellByHalfPackage) {
+                fail("VALIDATION", `Seleccione pelo menos um formato de venda para ${sku}.`);
+            }
+            if (sellByPackage || sellByHalfPackage) {
+                if (packageQtyMilli <= 0 || packageQtyMilli % 1000 !== 0) {
+                    fail("VALIDATION", `Indique um número inteiro positivo de unidades por pacote para ${sku}.`);
+                }
+                if (sellByHalfPackage && packageQtyMilli % 2000 !== 0) {
+                    fail("VALIDATION", `O pacote de ${sku} deve conter um número par de unidades para vender metade.`);
+                }
+                if (sellByPackage && packagePriceCents <= 0) {
+                    fail("VALIDATION", `Indique o preço do pacote para ${sku}.`);
+                }
+                if (sellByHalfPackage && halfPackagePriceCents <= 0) {
+                    fail("VALIDATION", `Indique o preço da meia embalagem para ${sku}.`);
+                }
+            }
             const key = `${norm(sku)}|${norm(name)}|${norm(color)}`;
             if (seen.has(key))
                 fail("IMPORT_INVALID", `O produto ${sku} · ${name} · ${color} aparece mais de uma vez na importação.`);
@@ -326,11 +374,9 @@ function commitStockImport(payload) {
             if (product && (!toBool(product.active) || !toBool(product.track_stock) || String(product.unit) !== "un")) {
                 fail("IMPORT_CONFLICT", `O produto ${sku} · ${color} existe, mas está inactivo ou não controla stock em unidades.`);
             }
-            if (!product && (!salePriceCents || salePriceCents <= 0)) {
-                fail("VALIDATION", `Indique o preço de venda em MZN para o novo produto ${sku} · ${color}.`);
-            }
-            if (product && Number(product.price_cents) <= 0 && (!salePriceCents || salePriceCents <= 0)) {
-                fail("VALIDATION", `Indique o preço de venda em MZN para o produto ${sku} · ${color}.`);
+            const unitPriceCents = Number(product?.price_cents ?? 0) > 0 ? Number(product?.price_cents) : salePriceCents ?? 0;
+            if (sellByUnit && unitPriceCents <= 0) {
+                fail("VALIDATION", `Indique o preço por unidade para ${sku} · ${color}, ou desactive a venda por unidade.`);
             }
             let productId;
             let stockBefore;
@@ -338,7 +384,51 @@ function commitStockImport(payload) {
                 productId = String(product.id);
                 const stored = one("SELECT stock_on_hand_milli FROM products WHERE id = ?", [productId]);
                 stockBefore = Number(stored?.stock_on_hand_milli ?? 0);
-                run("UPDATE products SET cost_cents = ?, price_cents = CASE WHEN price_cents <= 0 THEN ? ELSE price_cents END, stock_on_hand_milli = ?, updated_at = ? WHERE id = ?", [unitCostCents, salePriceCents ?? 0, stockBefore + qtyMilli, now, productId]);
+                const beforeConfig = {
+                    priceCents: Number(product.price_cents),
+                    packageQtyMilli: Number(product.package_qty_milli ?? 0),
+                    packagePriceCents: Number(product.package_price_cents ?? 0),
+                    halfPackagePriceCents: Number(product.half_package_price_cents ?? 0),
+                    sellByUnit: toBool(product.sell_by_unit),
+                    sellByPackage: toBool(product.sell_by_package),
+                    sellByHalfPackage: toBool(product.sell_by_half_package),
+                };
+                const afterConfig = {
+                    priceCents: beforeConfig.priceCents > 0 ? beforeConfig.priceCents : sellByUnit ? salePriceCents ?? 0 : 0,
+                    packageQtyMilli,
+                    packagePriceCents,
+                    halfPackagePriceCents,
+                    sellByUnit,
+                    sellByPackage,
+                    sellByHalfPackage,
+                };
+                run(`UPDATE products SET cost_cents = ?, price_cents = CASE WHEN price_cents <= 0 AND ? = 1 THEN ? ELSE price_cents END,
+             package_qty_milli = ?, package_price_cents = ?, half_package_price_cents = ?,
+             sell_by_unit = ?, sell_by_package = ?, sell_by_half_package = ?,
+             stock_on_hand_milli = ?, updated_at = ? WHERE id = ?`, [
+                    unitCostCents,
+                    sellByUnit ? 1 : 0,
+                    salePriceCents ?? 0,
+                    packageQtyMilli,
+                    packagePriceCents,
+                    halfPackagePriceCents,
+                    sellByUnit ? 1 : 0,
+                    sellByPackage ? 1 : 0,
+                    sellByHalfPackage ? 1 : 0,
+                    stockBefore + qtyMilli,
+                    now,
+                    productId,
+                ]);
+                const packageConfigChanged = beforeConfig.priceCents !== afterConfig.priceCents
+                    || beforeConfig.packageQtyMilli !== afterConfig.packageQtyMilli
+                    || beforeConfig.packagePriceCents !== afterConfig.packagePriceCents
+                    || beforeConfig.halfPackagePriceCents !== afterConfig.halfPackagePriceCents
+                    || beforeConfig.sellByUnit !== afterConfig.sellByUnit
+                    || beforeConfig.sellByPackage !== afterConfig.sellByPackage
+                    || beforeConfig.sellByHalfPackage !== afterConfig.sellByHalfPackage;
+                if (packageConfigChanged) {
+                    audit("product.updated", "product", productId, beforeConfig, afterConfig, current.userId);
+                }
             }
             else {
                 productId = uuid();
@@ -349,9 +439,37 @@ function commitStockImport(payload) {
             package_qty_milli, package_price_cents, half_package_price_cents,
             sell_by_unit, sell_by_package, sell_by_half_package, cost_cents, tax_rate_bp,
             track_stock, stock_on_hand_milli, low_stock_threshold_milli, active, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, NULL, 'un', ?, 0, 0, 0, 1, 0, 0, ?, 1600, 1, ?, 0, 1, ?, ?)`, [productId, sku, name, color, searchText, salePriceCents, unitCostCents, qtyMilli, now, now]);
+          ) VALUES (?, ?, ?, ?, ?, NULL, 'un', ?, ?, ?, ?, ?, ?, ?, ?, 1600, 1, ?, 0, 1, ?, ?)`, [
+                    productId,
+                    sku,
+                    name,
+                    color,
+                    searchText,
+                    sellByUnit ? salePriceCents ?? 0 : 0,
+                    packageQtyMilli,
+                    packagePriceCents,
+                    halfPackagePriceCents,
+                    sellByUnit ? 1 : 0,
+                    sellByPackage ? 1 : 0,
+                    sellByHalfPackage ? 1 : 0,
+                    unitCostCents,
+                    qtyMilli,
+                    now,
+                    now,
+                ]);
                 createdCount += 1;
-                audit("product.created", "product", productId, null, { sku, name, color, unit: "un" }, current.userId);
+                audit("product.created", "product", productId, null, {
+                    sku,
+                    name,
+                    color,
+                    unit: "un",
+                    packageQtyMilli,
+                    packagePriceCents,
+                    halfPackagePriceCents,
+                    sellByUnit,
+                    sellByPackage,
+                    sellByHalfPackage,
+                }, current.userId);
             }
             run(`INSERT INTO stock_movements (
           id, product_id, type, qty_milli, balance_after_milli, unit_cost_cents, supplier_id,
@@ -501,6 +619,9 @@ function buildQuote(payload, currentSession) {
                 fail("QTY_INVALID", "A quantidade convertida para stock é inválida.");
             stockQtyMilli = stockQty;
             unitPrice = Number(saleUnit === "package" ? row.package_price_cents : row.half_package_price_cents);
+        }
+        if (!Number.isSafeInteger(unitPrice) || unitPrice <= 0) {
+            fail("PRICE_INVALID", `O preço do formato seleccionado para ${row.name} não está configurado.`);
         }
         const grossLine = roundHalfUp((unitPrice * saleQtyMilli) / 1000);
         const lineDiscount = Math.min(Math.max(0, Math.trunc(Number(item.lineDiscountCents ?? 0))), grossLine);
@@ -1064,6 +1185,29 @@ async function migrate() {
         }
     }
 }
+async function openOpfsDatabase() {
+    // O OPFS usa um lock exclusivo por ficheiro. Ao recarregar ou abrir uma nova
+    // instância, o worker anterior pode ainda não ter libertado o acesso; nestes
+    // casos vale a pena esperar um pouco em vez de mostrar um erro definitivo.
+    const delays = [0, 120, 250, 500, 1000, 2000];
+    let lastError = null;
+    for (const delay of delays) {
+        if (delay > 0)
+            await new Promise((resolve) => setTimeout(resolve, delay));
+        try {
+            return new sqlite3.oo1.OpfsDb("/pos.sqlite3");
+        }
+        catch (error) {
+            lastError = error;
+        }
+    }
+    console.error("[sqlite] Não foi possível abrir /pos.sqlite3", lastError);
+    const detail = lastError instanceof Error ? lastError.message : String(lastError ?? "");
+    if (/NoModificationAllowed|locked|lock|busy/i.test(detail)) {
+        fail("DB_BUSY", "A base local já está aberta noutro separador ou janela. Feche as outras instâncias do POS e recarregue esta página.");
+    }
+    fail("OPFS_UNAVAILABLE", "Não foi possível abrir a base local. Use Chrome/Edge actualizado e confirme que a app tem isolamento cross-origin (COOP/COEP).");
+}
 async function ensureDb() {
     if (db)
         return;
@@ -1072,15 +1216,10 @@ async function ensureDb() {
     }
     if (!sqlite3) {
         const url = new URL("../sqlite/index.mjs", self_.location.href).href;
-        const module = await import(/* webpackIgnore: true */ url);
-        sqlite3 = await module.default();
+        const sqliteModule = await import(/* webpackIgnore: true */ url);
+        sqlite3 = await sqliteModule.default();
     }
-    try {
-        db = new sqlite3.oo1.OpfsDb("/pos.sqlite3");
-    }
-    catch {
-        fail("OPFS_UNAVAILABLE", "Não foi possível abrir a base local. Use Chrome/Edge e confirme que a app tem isolamento cross-origin (COOP/COEP).");
-    }
+    db = await openOpfsDatabase();
     db.exec("PRAGMA foreign_keys = ON;");
     db.exec("PRAGMA busy_timeout = 5000;");
     db.exec("PRAGMA journal_mode = DELETE;");
@@ -1539,6 +1678,60 @@ async function createAutoBackup() {
     audit("backup.auto_created", "backup", null, null, { filename, size: copy.byteLength });
     return { created: true, lastAutoBackupAt: createdAt };
 }
+async function purgeOperationalData(payload) {
+    const current = requireSession(["owner"]);
+    await ensureDb();
+    if (payload.confirmation !== "ELIMINAR")
+        fail("CONFIRMATION_REQUIRED", "Escreva ELIMINAR para confirmar a operação.");
+    const pin = String(payload.pin ?? "");
+    if (!/^\d{6}$/.test(pin))
+        fail("VALIDATION", "Introduza o PIN actual do proprietário.");
+    const owner = one("SELECT * FROM users WHERE id = ?", [current.userId]);
+    if (!owner)
+        fail("UNAUTHENTICATED", "Sessão inválida.");
+    const candidate = await hashPin(pin, String(owner.pin_salt), Number(owner.pin_iterations));
+    if (!timingSafeEqual(candidate.hash, String(owner.pin_hash)))
+        fail("PIN_INVALID", "PIN do proprietário incorrecto.");
+    if (!db)
+        fail("DB_NOT_READY", "A base não está aberta.");
+    const backup = sqlite3.capi.sqlite3_js_db_export(db.pointer).slice();
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupName = `pre-purge-${stamp}.db`;
+    await writeBackupFile(backupName, backup);
+    const now = nowIso();
+    const schemaVersion = Number(one("PRAGMA user_version")?.user_version ?? 0);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+        const deleted = {
+            products: Number(one("SELECT COUNT(*) AS count FROM products")?.count ?? 0),
+            stockMovements: Number(one("SELECT COUNT(*) AS count FROM stock_movements")?.count ?? 0),
+            sales: Number(one("SELECT COUNT(*) AS count FROM sales")?.count ?? 0),
+            auditEntries: Number(one("SELECT COUNT(*) AS count FROM audit_log")?.count ?? 0),
+        };
+        run("INSERT INTO backup_log (id, created_at, method, size_bytes, note, schema_version) VALUES (?, ?, 'pre-purge', ?, ?, ?)", [
+            uuid(),
+            now,
+            backup.byteLength,
+            backupName,
+            schemaVersion,
+        ]);
+        setMeta("last_backup_at", now);
+        run("DELETE FROM approvals");
+        run("DELETE FROM product_barcodes");
+        run("DELETE FROM stock_movements");
+        run("DELETE FROM sale_payments");
+        run("DELETE FROM sale_items");
+        run("DELETE FROM sales");
+        run("DELETE FROM products");
+        run("DELETE FROM audit_log");
+        db.exec("COMMIT");
+        return { backupName, deleted };
+    }
+    catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+    }
+}
 async function importBackup(payload) {
     const current = requireSession(["owner"]);
     await ensureDb();
@@ -1682,6 +1875,8 @@ async function handleRequest(req) {
             audit("settings.updated", "settings", "default", before, after, current.userId);
             return { data: after };
         }
+        case "data.purge":
+            return { data: await purgeOperationalData(payload) };
         case "user.list": {
             requireSession(["owner"]);
             return { data: rows("SELECT id, username, display_name, role, active, must_change_pin, last_login_at FROM users ORDER BY created_at").map(toUser) };
@@ -1811,8 +2006,15 @@ async function handleRequest(req) {
             const sellByUnit = payload.sellByUnit === false ? 0 : 1;
             const sellByPackage = payload.sellByPackage === true ? 1 : 0;
             const sellByHalfPackage = payload.sellByHalfPackage === true ? 1 : 0;
-            if (!Number.isSafeInteger(packageQtyMilli))
-                fail("VALIDATION", "A quantidade por pacote é inválida.");
+            if (![price, cost, packageQtyMilli, packagePrice, halfPackagePrice].every(Number.isSafeInteger)) {
+                fail("VALIDATION", "Um dos preços ou quantidades do produto é inválido.");
+            }
+            if (sellByUnit && price <= 0)
+                fail("VALIDATION", "Indique um preço por unidade válido para este formato de venda.");
+            if (sellByPackage && packagePrice <= 0)
+                fail("VALIDATION", "Indique um preço válido para o pacote.");
+            if (sellByHalfPackage && halfPackagePrice <= 0)
+                fail("VALIDATION", "Indique um preço válido para a meia embalagem.");
             if ((sellByPackage || sellByHalfPackage) && packageQtyMilli <= 0) {
                 fail("VALIDATION", "Indique quantas unidades-base existem em cada pacote.");
             }

@@ -36,6 +36,8 @@ export function ReportsScreen() {
   }, [call, from, to, toast]);
 
   useEffect(() => {
+    // Carga inicial assíncrona: o estado só é alterado depois do primeiro await.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
 

@@ -12,7 +12,16 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Artefactos gerados: bundle do SW, sqlite-wasm e worker compilado.
+    "public/**",
   ]),
+  {
+    // O worker fala com a API do sqlite-wasm, que não expõe tipos utilizáveis.
+    files: ["workers/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;

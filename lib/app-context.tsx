@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { ApiError, db } from "@/lib/db/client";
@@ -46,17 +47,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [bootError, setBootError] = useState<string | null>(null);
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [session, setSession] = useState<SessionInfo | null>(null);
-  const [online, setOnline] = useState(true);
   const [updateReady, setUpdateReady] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const online = useSyncExternalStore(
+    (onChange) => {
+      window.addEventListener("online", onChange);
+      window.addEventListener("offline", onChange);
+      return () => {
+        window.removeEventListener("online", onChange);
+        window.removeEventListener("offline", onChange);
+      };
+    },
+    () => navigator.onLine,
+    () => true,
+  );
 
   const sessionRef = useRef<SessionInfo | null>(null);
-  const lastActivityRef = useRef(Date.now());
+  const lastActivityRef = useRef(0);
   const waitingWorkerRef = useRef<ServiceWorker | null>(null);
   const registrationRef = useRef<ServiceWorkerRegistration | null>(null);
   const applyingUpdateRef = useRef(false);
 
-  sessionRef.current = session;
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
 
   const toast = useCallback((message: string, kind: ToastKind = "info") => {
     const id = crypto.randomUUID();
@@ -91,18 +105,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       });
     return () => {
       cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    setOnline(navigator.onLine);
-    const goOnline = () => setOnline(true);
-    const goOffline = () => setOnline(false);
-    window.addEventListener("online", goOnline);
-    window.addEventListener("offline", goOffline);
-    return () => {
-      window.removeEventListener("online", goOnline);
-      window.removeEventListener("offline", goOffline);
     };
   }, []);
 
@@ -208,15 +210,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const enterSession = useCallback((next: SessionInfo) => {
     lastActivityRef.current = Date.now();
+    sessionRef.current = next;
     setSession(next);
   }, []);
 
   const updateSettings = useCallback((next: Settings) => {
-    setSession((current) => (current ? { ...current, settings: next } : current));
+    setSession((current) => {
+      const updated = current ? { ...current, settings: next } : current;
+      sessionRef.current = updated;
+      return updated;
+    });
   }, []);
 
   const signOut = useCallback(async () => {
     const current = sessionRef.current;
+    sessionRef.current = null;
     setSession(null);
     if (current) {
       try {
@@ -229,6 +237,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const lock = useCallback(async () => {
     const current = sessionRef.current;
+    sessionRef.current = null;
     setSession(null);
     if (current) {
       try {
@@ -243,7 +252,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     async <T,>(type: RequestType, payload?: unknown): Promise<T> => {
       const current = sessionRef.current;
       try {
-        return await db.request<T>(type, payload, current?.token ?? null, type === "backup.import" ? 300_000 : undefined);
+        const timeout = type === "backup.import" || type === "data.purge" ? 300_000 : undefined;
+        return await db.request<T>(type, payload, current?.token ?? null, timeout);
       } catch (error) {
         if (error instanceof ApiError && (error.code === "UNAUTHENTICATED" || error.code === "SESSION_LOCKED")) {
           setSession(null);

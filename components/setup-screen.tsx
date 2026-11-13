@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Check, ClipboardCopy, KeyRound, ShieldCheck } from "lucide-react";
 import { useApp, errorMessage } from "@/lib/app-context";

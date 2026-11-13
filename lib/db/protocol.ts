@@ -116,12 +116,27 @@ export interface StockImportItem {
   salePriceCents: number | null;
 }
 
+export interface StockImportCommitItem extends StockImportItem {
+  packageQtyMilli: number;
+  packagePriceCents: number;
+  halfPackagePriceCents: number;
+  sellByUnit: boolean;
+  sellByPackage: boolean;
+  sellByHalfPackage: boolean;
+}
+
 export interface StockImportMatch {
   productId: string | null;
   active: boolean | null;
   trackStock: boolean | null;
   unit: Unit | null;
   priceCents: number | null;
+  packageQtyMilli: number;
+  packagePriceCents: number;
+  halfPackagePriceCents: number;
+  sellByUnit: boolean;
+  sellByPackage: boolean;
+  sellByHalfPackage: boolean;
 }
 
 export interface PagedResult<T> {
@@ -334,6 +349,7 @@ export type RequestType =
   | "auth.changePin"
   | "approval.request"
   | "settings.update"
+  | "data.purge"
   | "user.list"
   | "user.create"
   | "user.update"
