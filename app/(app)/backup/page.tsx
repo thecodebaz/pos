@@ -1,0 +1,10 @@
+import type { Metadata } from "next";
+import { BackupScreen } from "@/components/backup-screen";
+
+export const metadata: Metadata = {
+  title: "Backup · POS",
+};
+
+export default function BackupPage() {
+  return <BackupScreen />;
+}

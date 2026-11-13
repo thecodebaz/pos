@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "WebWorker"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": false,
+    "outDir": "../public",
+    "rootDir": "..",
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "types": []
+  },
+  "include": ["./sqlite.worker.ts", "../lib/db/protocol.ts"]
+}
