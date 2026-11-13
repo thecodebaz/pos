@@ -254,6 +254,38 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  useEffect(() => {
+    if (boot !== "ready") return;
+    let running = false;
+
+    const runAutoBackup = async () => {
+      if (running || document.visibilityState !== "visible") return;
+      running = true;
+      try {
+        const execute = async () => {
+          await call<{ created: boolean }>("backup.auto");
+        };
+        if (navigator.locks) {
+          await navigator.locks.request("pos-auto-backup", execute);
+        } else {
+          await execute();
+        }
+      } catch (error) {
+        toast(`O backup automático falhou: ${errorMessage(error)}`, "error");
+      } finally {
+        running = false;
+      }
+    };
+
+    const interval = window.setInterval(() => void runAutoBackup(), 6 * 60 * 60 * 1000);
+    document.addEventListener("visibilitychange", runAutoBackup);
+    void runAutoBackup();
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", runAutoBackup);
+    };
+  }, [boot, call, toast]);
+
   const value = useMemo<AppContextValue>(
     () => ({
       boot,

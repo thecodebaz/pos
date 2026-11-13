@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowDownUp, Boxes, Plus, Search } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { ArrowDownUp, Boxes, FileSpreadsheet, Plus, Search } from "lucide-react";
 import { useApp, errorMessage } from "@/lib/app-context";
 import type { PagedResult, Product, StockEntryUnit, StockMovement, Supplier } from "@/lib/db/protocol";
+import { parseStockImportWorkbook, STOCK_IMPORT_DRAFT_KEY } from "@/lib/stock-import";
 import { formatDateTime, formatMzn, formatMznPlain, formatQty, parseMzn, parseQty } from "@/lib/format";
 import { Badge, EmptyState, Field, LoadingPanel, MoneyInput, Note, PageHeader, Select } from "@/components/shared";
 import { Button } from "@/components/ui/button";
@@ -24,8 +26,12 @@ const MOVEMENT_LABELS: Record<string, string> = {
 };
 
 export function StockScreen() {
-  const { call, toast } = useApp();
+  const { session, call, toast } = useApp();
+  const router = useRouter();
+  const importFileRef = useRef<HTMLInputElement>(null);
   const [products, setProducts] = useState<Product[]>([]);
+  const [lowProducts, setLowProducts] = useState<Product[]>([]);
+  const [productTotal, setProductTotal] = useState(0);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [history, setHistory] = useState<StockMovement[]>([]);
@@ -34,6 +40,7 @@ export function StockScreen() {
   const [productPage, setProductPage] = useState(1);
   const [historyPage, setHistoryPage] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [importingFile, setImportingFile] = useState(false);
   const [query, setQuery] = useState("");
   const [dialog, setDialog] = useState<"entry" | "adjust" | null>(null);
   const [busy, setBusy] = useState(false);
@@ -49,25 +56,46 @@ export function StockScreen() {
     reason: "",
   });
 
+  const canImport = session?.user.role === "owner" || session?.user.role === "manager";
+
+  async function processStockWorkbook(file: File) {
+    setImportingFile(true);
+    try {
+      const draft = await parseStockImportWorkbook(file);
+      sessionStorage.setItem(STOCK_IMPORT_DRAFT_KEY, JSON.stringify(draft));
+      router.push("/stock/import/");
+    } catch (err) {
+      toast(errorMessage(err), "error");
+    } finally {
+      setImportingFile(false);
+    }
+  }
+
   const load = useCallback(async () => {
     try {
-      const [list, supplierList] = await Promise.all([
-        call<Product[]>("product.list", { activeOnly: true }),
+      const [productResult, lowProductList, supplierList] = await Promise.all([
+        call<PagedResult<Product>>("product.page", { activeOnly: true, trackStockOnly: true, query, page: productPage, pageSize: PRODUCT_PAGE_SIZE }),
+        call<Product[]>("stock.low"),
         call<Supplier[]>("supplier.list"),
       ]);
-      const tracked = list.filter((product) => product.trackStock);
-      setProducts(tracked);
+      setProducts(productResult.items);
+      setProductTotal(productResult.total);
+      setLowProducts(lowProductList);
+      if (productResult.page !== productPage) setProductPage(productResult.page);
       setSuppliers(supplierList);
-      setSelectedId((current) => current || tracked[0]?.id || "");
+      setSelectedId((current) => productResult.items.some((product) => product.id === current)
+        ? current
+        : productResult.items[0]?.id || "");
     } catch (err) {
       toast(errorMessage(err), "error");
     } finally {
       setLoading(false);
     }
-  }, [call, toast]);
+  }, [call, productPage, query, toast]);
 
   useEffect(() => {
-    void load();
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
   }, [load]);
 
   const loadHistory = useCallback(async (productId: string, requestedPage: number) => {
@@ -86,7 +114,7 @@ export function StockScreen() {
       });
       setHistory(result.items);
       setHistoryTotal(result.total);
-      if (result.page !== requestedPage) setHistoryPage(result.page);
+      setHistoryPage(result.page);
     } catch (err) {
       toast(errorMessage(err), "error");
     } finally {
@@ -95,18 +123,12 @@ export function StockScreen() {
   }, [call, toast]);
 
   useEffect(() => {
-    void loadHistory(selectedId, historyPage);
+    const timer = window.setTimeout(() => void loadHistory(selectedId, historyPage), 0);
+    return () => window.clearTimeout(timer);
   }, [selectedId, historyPage, loadHistory]);
 
   const selected = products.find((product) => product.id === selectedId) ?? null;
-  const filtered = useMemo(() => {
-    const text = query.toLowerCase().trim();
-    if (!text) return products;
-    return products.filter((product) => `${product.name} ${product.sku}`.toLowerCase().includes(text));
-  }, [products, query]);
-  const productPageCount = Math.max(1, Math.ceil(filtered.length / PRODUCT_PAGE_SIZE));
-  const currentProductPage = Math.min(productPage, productPageCount);
-  const visibleProducts = filtered.slice((currentProductPage - 1) * PRODUCT_PAGE_SIZE, currentProductPage * PRODUCT_PAGE_SIZE);
+  const currentProductPage = Math.min(productPage, Math.max(1, Math.ceil(productTotal / PRODUCT_PAGE_SIZE)));
   const historyPageCount = Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE));
   const currentHistoryPage = Math.min(historyPage, historyPageCount);
 
@@ -114,7 +136,7 @@ export function StockScreen() {
     setSelectedId(productId);
     setHistoryPage(1);
   }
-  const low = products.filter((product) => product.lowStockThresholdMilli > 0 && product.stockOnHandMilli <= product.lowStockThresholdMilli);
+  const low = lowProducts;
 
   function openDialog(kind: "entry" | "adjust") {
     setForm({ qty: "", cost: selected ? formatMznPlain(selected.costCents) : "", supplierId: "", documentRef: "", note: "", direction: "in", inputUnit: "unit", reason: "" });
@@ -175,6 +197,24 @@ export function StockScreen() {
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input value={query} onChange={(event) => { setQuery(event.target.value); setProductPage(1); }} placeholder="Filtrar produtos…" className="pl-8" />
             </div>
+            {canImport ? (
+              <>
+                <input
+                  ref={importFileRef}
+                  type="file"
+                  accept=".xlsx,.xls"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = "";
+                    if (file) void processStockWorkbook(file);
+                  }}
+                />
+                <Button variant="outline" onClick={() => importFileRef.current?.click()} disabled={importingFile}>
+                  <FileSpreadsheet className="size-4" /> {importingFile ? "A processar…" : "Importar Excel"}
+                </Button>
+              </>
+            ) : null}
             <Button variant="outline" onClick={() => openDialog("adjust")} disabled={!selected}>
               <ArrowDownUp className="size-4" /> Ajuste
             </Button>
@@ -194,8 +234,8 @@ export function StockScreen() {
                 key={product.id}
                 type="button"
                 onClick={() => {
-                  const index = filtered.findIndex((item) => item.id === product.id);
-                  if (index >= 0) setProductPage(Math.floor(index / PRODUCT_PAGE_SIZE) + 1);
+                  setQuery(product.sku);
+                  setProductPage(1);
                   selectProduct(product.id);
                 }}
                 className="rounded-md bg-white px-2 py-1 text-xs ring-1 ring-amber-300 dark:bg-amber-900/40 dark:ring-amber-800"
@@ -209,12 +249,12 @@ export function StockScreen() {
 
       <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
         <div className="rounded-xl bg-card ring-1 ring-foreground/10">
-          <p className="border-b px-3 py-2 text-sm font-medium">Produtos ({filtered.length})</p>
+          <p className="border-b px-3 py-2 text-sm font-medium">Produtos ({productTotal})</p>
           <div className="max-h-[60vh] overflow-y-auto p-1">
-            {filtered.length === 0 ? (
+            {products.length === 0 ? (
               <p className="p-3 text-sm text-muted-foreground">Sem produtos com controlo de stock.</p>
             ) : (
-              visibleProducts.map((product) => {
+              products.map((product) => {
                 const isLow = product.lowStockThresholdMilli > 0 && product.stockOnHandMilli <= product.lowStockThresholdMilli;
                 return (
                   <button
@@ -229,6 +269,7 @@ export function StockScreen() {
                     <span className="min-w-0">
                       <span className="block truncate font-medium">{product.name}</span>
                       <span className={"block text-[11px] " + (product.id === selectedId ? "text-emerald-100" : "text-muted-foreground")}>{product.sku}</span>
+                      {product.color ? <span className="block text-[11px] opacity-80">Cor: {product.color}</span> : null}
                     </span>
                     <span className={"shrink-0 tabular-nums " + (isLow && product.id !== selectedId ? "text-amber-600" : "")}>
                       {formatQty(product.stockOnHandMilli)}
@@ -239,7 +280,7 @@ export function StockScreen() {
             )}
           </div>
           <div className="border-t p-2">
-            <PaginationControls page={currentProductPage} pageSize={PRODUCT_PAGE_SIZE} total={filtered.length} itemLabel="produtos" onPageChange={setProductPage} />
+            <PaginationControls page={currentProductPage} pageSize={PRODUCT_PAGE_SIZE} total={productTotal} itemLabel="produtos" onPageChange={setProductPage} />
           </div>
         </div>
 
@@ -251,7 +292,7 @@ export function StockScreen() {
                   <div>
                     <p className="text-lg font-semibold">{selected.name}</p>
                     <p className="text-xs text-muted-foreground">
-                      {selected.sku} · {selected.unit} · custo {formatMzn(selected.costCents)}
+                      {[selected.sku, selected.color, selected.unit, `custo ${formatMzn(selected.costCents)}`].filter(Boolean).join(" · ")}
                     </p>
                   </div>
                   <div className="text-right">

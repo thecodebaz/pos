@@ -85,6 +85,7 @@ export interface Product {
   id: string;
   sku: string;
   name: string;
+  color: string;
   categoryId: string | null;
   categoryName: string | null;
   unit: Unit;
@@ -102,6 +103,25 @@ export interface Product {
   lowStockThresholdMilli: number;
   active: boolean;
   barcodes: string[];
+}
+
+export interface StockImportItem {
+  sku: string;
+  name: string;
+  color: string;
+  qtyMilli: number;
+  purchaseCostMinor: number;
+  valueMinor: number;
+  lineCount: number;
+  salePriceCents: number | null;
+}
+
+export interface StockImportMatch {
+  productId: string | null;
+  active: boolean | null;
+  trackStock: boolean | null;
+  unit: Unit | null;
+  priceCents: number | null;
 }
 
 export interface PagedResult<T> {
@@ -298,6 +318,7 @@ export interface AuditEntry {
 
 export interface BackupInfo {
   lastBackupAt: string | null;
+  lastAutoBackupAt: string | null;
   backups: { name: string; sizeBytes: number }[];
 }
 
@@ -328,10 +349,14 @@ export type RequestType =
   | "stock.history"
   | "stock.history.page"
   | "stock.low"
+  | "stock.import.preview"
+  | "stock.import.commit"
   | "customer.list"
+  | "customer.page"
   | "customer.upsert"
   | "customer.delete"
   | "supplier.list"
+  | "supplier.page"
   | "supplier.upsert"
   | "supplier.delete"
   | "sale.quote"
@@ -344,6 +369,7 @@ export type RequestType =
   | "audit.list"
   | "audit.page"
   | "backup.export"
+  | "backup.auto"
   | "backup.import"
   | "backup.info";
 

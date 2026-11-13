@@ -31,6 +31,6 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 
 ## Deploy on Vercel
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+This project uses a static export and SQLite in the browser's OPFS. The `vercel.json` file configures the required COOP/COEP headers for every route; keep it in the deployment root.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+After deploying, verify that the site is cross-origin isolated (`window.crossOriginIsolated === true` in the browser console). If the app was open during deployment, reload it to pick up the new response headers. Do not clear browser storage; the database is stored locally in OPFS.

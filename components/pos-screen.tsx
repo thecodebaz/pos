@@ -402,6 +402,7 @@ export function PosScreen() {
                     className="flex flex-col items-start gap-1 rounded-xl bg-card p-3 text-left ring-1 ring-foreground/10 transition-all hover:ring-emerald-500 active:translate-y-px"
                   >
                     <span className="line-clamp-2 min-h-10 text-sm font-medium">{product.name}</span>
+                    {product.color ? <span className="text-xs text-muted-foreground">Cor: {product.color}</span> : null}
                     <span className="text-base font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">
                       {formatMzn(salePrice(product, defaultSaleUnit(product)))}
                     </span>
@@ -472,6 +473,7 @@ export function PosScreen() {
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium">{line.product.name}</p>
+                        {line.product.color ? <p className="text-xs text-muted-foreground">Cor: {line.product.color}</p> : null}
                         <p className="text-[11px] text-muted-foreground">
                           {formatMzn(quoteLine?.unitPriceCents ?? salePrice(line.product, line.saleUnit))} / {formatSaleUnit(line.saleUnit, line.product.unit)} · {line.product.sku}
                         </p>

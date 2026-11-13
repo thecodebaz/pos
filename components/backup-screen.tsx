@@ -8,11 +8,10 @@ import { formatBytes, formatDateTime } from "@/lib/format";
 import { Badge, Field, LoadingPanel, Note, PageHeader } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 export function BackupScreen() {
-  const { session, call, toast, refreshStatus } = useApp();
+  const { call, toast, refreshStatus } = useApp();
   const [info, setInfo] = useState<BackupInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
@@ -34,7 +33,8 @@ export function BackupScreen() {
   }, [call, toast]);
 
   useEffect(() => {
-    void load();
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
   }, [load]);
 
   async function exportBackup() {
@@ -94,6 +94,10 @@ export function BackupScreen() {
           O ficheiro exportado contém todos os dados da loja, incluindo hashes de PIN. Guarde-o num local seguro. Não é um
           backup encriptado; recomenda-se disco encriptado e cópia offline.
         </Note>
+        <Note>
+          A aplicação cria uma cópia automática local a cada 6 horas enquanto estiver aberta. As cópias ficam no OPFS deste
+          browser e não substituem a exportação para outro dispositivo ou suporte.
+        </Note>
 
         <div className="rounded-xl bg-card p-4 ring-1 ring-foreground/10">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -102,7 +106,9 @@ export function BackupScreen() {
                 <HardDriveDownload className="size-4 text-emerald-600" /> Exportar base actual
               </p>
               <p className="mt-1 text-sm text-muted-foreground">
-                Último backup: {info?.lastBackupAt ? formatDateTime(info.lastBackupAt) : "nunca"} · Utilizador: {session?.user.displayName}
+                Último backup exportado: {info?.lastBackupAt ? formatDateTime(info.lastBackupAt) : "nunca"}
+                <br />
+                Último backup automático local: {info?.lastAutoBackupAt ? formatDateTime(info.lastAutoBackupAt) : "pendente"}
               </p>
             </div>
             <Button onClick={() => void exportBackup()} disabled={exporting}>

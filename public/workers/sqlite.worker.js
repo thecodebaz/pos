@@ -1,7 +1,9 @@
 /// <reference lib="webworker" />
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const PIN_ITERATIONS = 600_000;
 const MAX_IMPORT_BYTES = 512 * 1024 * 1024;
+const AUTO_BACKUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const AUTO_BACKUP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const APPROVAL_TTL_MS = 2 * 60 * 1000;
 const self_ = self;
 let sqlite3 = null;
@@ -213,6 +215,7 @@ function toProduct(row) {
         id: String(row.id),
         sku: String(row.sku),
         name: String(row.name),
+        color: String(row.color ?? ""),
         categoryId: row.category_id ? String(row.category_id) : null,
         categoryName: row.category_name ? String(row.category_name) : null,
         unit: String(row.unit),
@@ -232,11 +235,192 @@ function toProduct(row) {
         barcodes: row.barcodes ? String(row.barcodes).split(",").filter(Boolean) : [],
     };
 }
+function findStockImportProduct(sku, name, color) {
+    const matches = rows(`SELECT id, active, track_stock, unit, price_cents
+     FROM products
+     WHERE deleted_at IS NULL
+       AND sku = ? COLLATE NOCASE
+       AND lower(trim(name)) = lower(trim(?))
+       AND upper(trim(color)) = upper(trim(?))
+     LIMIT 2`, [sku, name, color]);
+    if (matches.length > 1)
+        fail("IMPORT_AMBIGUOUS", `Há mais de um produto registado para ${sku} · ${name} · ${color}.`);
+    return matches[0] ?? null;
+}
+function previewStockImport(rawItems) {
+    requireSession(["owner", "manager"]);
+    if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 500) {
+        fail("IMPORT_INVALID", "O ficheiro deve conter entre 1 e 500 produtos.");
+    }
+    return rawItems.map((item) => {
+        const sku = String(item.sku ?? "").trim();
+        const name = String(item.name ?? "").trim();
+        const color = String(item.color ?? "").trim();
+        if (!sku || !name || !color)
+            fail("IMPORT_INVALID", "Cada linha precisa de SKU, nome e cor.");
+        const product = findStockImportProduct(sku, name, color);
+        return product
+            ? {
+                productId: String(product.id),
+                active: toBool(product.active),
+                trackStock: toBool(product.track_stock),
+                unit: String(product.unit),
+                priceCents: Number(product.price_cents),
+            }
+            : { productId: null, active: null, trackStock: null, unit: null, priceCents: null };
+    });
+}
+function commitStockImport(payload) {
+    const current = requireSession(["owner", "manager"]);
+    const items = payload.items;
+    const exchangeRate = Number(payload.exchangeRate);
+    if (!Array.isArray(items) || items.length === 0 || items.length > 500) {
+        fail("IMPORT_INVALID", "O ficheiro deve conter entre 1 e 500 produtos.");
+    }
+    if (!Number.isFinite(exchangeRate) || exchangeRate <= 0 || exchangeRate > 100_000) {
+        fail("VALIDATION", "Indique uma taxa de conversão Rand → MZN válida.");
+    }
+    const documentRef = String(payload.documentRef ?? "").trim().slice(0, 100) || null;
+    const seen = new Set();
+    const now = nowIso();
+    let createdCount = 0;
+    let totalQuantityMilli = 0;
+    let totalCostCents = 0;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+        for (const raw of items) {
+            const sku = String(raw.sku ?? "").trim();
+            const name = String(raw.name ?? "").trim();
+            const color = String(raw.color ?? "").trim();
+            const qtyMilli = Math.trunc(Number(raw.qtyMilli));
+            const purchaseCostMinor = Math.trunc(Number(raw.purchaseCostMinor));
+            const valueMinor = Math.trunc(Number(raw.valueMinor));
+            const lineCount = Math.trunc(Number(raw.lineCount));
+            const salePriceCents = raw.salePriceCents === null || raw.salePriceCents === undefined
+                ? null
+                : Math.trunc(Number(raw.salePriceCents));
+            if (!sku || sku.length > 100 || !name || name.length > 160 || !color || color.length > 60) {
+                fail("IMPORT_INVALID", "Todos os produtos precisam de SKU, nome e cor válidos.");
+            }
+            if (!Number.isSafeInteger(qtyMilli) || qtyMilli <= 0 || qtyMilli % 1000 !== 0) {
+                fail("IMPORT_INVALID", `A quantidade de ${sku} deve ser um número inteiro positivo.`);
+            }
+            if (!Number.isSafeInteger(purchaseCostMinor) || purchaseCostMinor < 0
+                || !Number.isSafeInteger(valueMinor) || valueMinor < 0
+                || !Number.isSafeInteger(lineCount) || lineCount < 1) {
+                fail("IMPORT_INVALID", `Os valores da factura para ${sku} são inválidos.`);
+            }
+            if (salePriceCents !== null && (!Number.isSafeInteger(salePriceCents) || salePriceCents < 0)) {
+                fail("IMPORT_INVALID", `O preço de venda de ${sku} é inválido.`);
+            }
+            const key = `${norm(sku)}|${norm(name)}|${norm(color)}`;
+            if (seen.has(key))
+                fail("IMPORT_INVALID", `O produto ${sku} · ${name} · ${color} aparece mais de uma vez na importação.`);
+            seen.add(key);
+            const purchaseTotalCents = Math.round(purchaseCostMinor * exchangeRate);
+            const unitCostCents = Math.round((purchaseTotalCents * 1000) / qtyMilli);
+            if (!Number.isSafeInteger(purchaseTotalCents) || !Number.isSafeInteger(unitCostCents)) {
+                fail("IMPORT_INVALID", `O custo convertido para ${sku} excede o limite permitido.`);
+            }
+            const product = findStockImportProduct(sku, name, color);
+            if (product && (!toBool(product.active) || !toBool(product.track_stock) || String(product.unit) !== "un")) {
+                fail("IMPORT_CONFLICT", `O produto ${sku} · ${color} existe, mas está inactivo ou não controla stock em unidades.`);
+            }
+            if (!product && (!salePriceCents || salePriceCents <= 0)) {
+                fail("VALIDATION", `Indique o preço de venda em MZN para o novo produto ${sku} · ${color}.`);
+            }
+            if (product && Number(product.price_cents) <= 0 && (!salePriceCents || salePriceCents <= 0)) {
+                fail("VALIDATION", `Indique o preço de venda em MZN para o produto ${sku} · ${color}.`);
+            }
+            let productId;
+            let stockBefore;
+            if (product) {
+                productId = String(product.id);
+                const stored = one("SELECT stock_on_hand_milli FROM products WHERE id = ?", [productId]);
+                stockBefore = Number(stored?.stock_on_hand_milli ?? 0);
+                run("UPDATE products SET cost_cents = ?, price_cents = CASE WHEN price_cents <= 0 THEN ? ELSE price_cents END, stock_on_hand_milli = ?, updated_at = ? WHERE id = ?", [unitCostCents, salePriceCents ?? 0, stockBefore + qtyMilli, now, productId]);
+            }
+            else {
+                productId = uuid();
+                stockBefore = 0;
+                const searchText = norm(`${name} ${sku} ${color}`);
+                run(`INSERT INTO products (
+            id, sku, name, color, search_text, category_id, unit, price_cents,
+            package_qty_milli, package_price_cents, half_package_price_cents,
+            sell_by_unit, sell_by_package, sell_by_half_package, cost_cents, tax_rate_bp,
+            track_stock, stock_on_hand_milli, low_stock_threshold_milli, active, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, NULL, 'un', ?, 0, 0, 0, 1, 0, 0, ?, 1600, 1, ?, 0, 1, ?, ?)`, [productId, sku, name, color, searchText, salePriceCents, unitCostCents, qtyMilli, now, now]);
+                createdCount += 1;
+                audit("product.created", "product", productId, null, { sku, name, color, unit: "un" }, current.userId);
+            }
+            run(`INSERT INTO stock_movements (
+          id, product_id, type, qty_milli, balance_after_milli, unit_cost_cents, supplier_id,
+          supplier_name_snapshot, document_ref, reason, sale_id, user_id, created_at
+        ) VALUES (?, ?, 'purchase_in', ?, ?, ?, NULL, NULL, ?, ?, NULL, ?, ?)`, [
+                uuid(),
+                productId,
+                qtyMilli,
+                stockBefore + qtyMilli,
+                unitCostCents,
+                documentRef,
+                `Importação Excel (${lineCount} linha(s); câmbio R→MZN ${exchangeRate})`,
+                current.userId,
+                now,
+            ]);
+            audit("stock.imported", "product", productId, { stock: stockBefore }, { stock: stockBefore + qtyMilli, qtyMilli, unitCostCents, purchaseCostMinor, valueMinor, exchangeRate, documentRef }, current.userId);
+            totalQuantityMilli += qtyMilli;
+            totalCostCents += purchaseTotalCents;
+            if (!Number.isSafeInteger(totalQuantityMilli) || !Number.isSafeInteger(totalCostCents)) {
+                fail("IMPORT_INVALID", "Os totais da importação excedem o limite permitido.");
+            }
+        }
+        db.exec("COMMIT");
+    }
+    catch (error) {
+        db.exec("ROLLBACK");
+        if (String(error).includes("UNIQUE"))
+            fail("DUPLICATE", "Já existe um produto com o mesmo SKU, nome e cor.");
+        throw error;
+    }
+    return { productCount: items.length, createdCount, quantityMilli: totalQuantityMilli, totalCostCents };
+}
 function productRows(where = "", bind = []) {
     return rows(`SELECT p.*, c.name AS category_name,
        (SELECT group_concat(barcode, ',') FROM product_barcodes WHERE product_id = p.id) AS barcodes
      FROM products p LEFT JOIN categories c ON c.id = p.category_id
      ${where}`, bind);
+}
+function productFilter(payload) {
+    const query = norm(payload.query);
+    const categoryId = payload.categoryId ? String(payload.categoryId) : null;
+    const bind = [];
+    let where = "WHERE p.deleted_at IS NULL";
+    if (payload.activeOnly !== false)
+        where += " AND p.active = 1";
+    if (categoryId) {
+        where += " AND p.category_id = ?";
+        bind.push(categoryId);
+    }
+    if (payload.trackStockOnly === true)
+        where += " AND p.track_stock = 1";
+    if (query) {
+        where += " AND (p.search_text LIKE ? OR p.sku LIKE ? OR lower(p.color) LIKE ? OR lower(c.name) LIKE ? OR EXISTS (SELECT 1 FROM product_barcodes b WHERE b.product_id = p.id AND b.barcode LIKE ?))";
+        bind.push(`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`);
+    }
+    return { where, bind, query };
+}
+function paginationInput(payload, defaultPageSize = 25) {
+    const requestedPage = Math.trunc(Number(payload.page ?? 1));
+    const requestedPageSize = Math.trunc(Number(payload.pageSize ?? defaultPageSize));
+    return {
+        page: Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1,
+        pageSize: Number.isSafeInteger(requestedPageSize)
+            ? Math.min(100, Math.max(1, requestedPageSize))
+            : defaultPageSize,
+    };
+}
+function resolvePage(page, pageSize, total) {
+    return Math.min(page, Math.max(1, Math.ceil(total / pageSize)));
 }
 function lowStockProducts() {
     return productRows("WHERE p.deleted_at IS NULL AND p.active = 1 AND p.track_stock = 1 AND p.low_stock_threshold_milli > 0 AND p.stock_on_hand_milli <= p.low_stock_threshold_milli ORDER BY p.name LIMIT 100").map(toProduct);
@@ -326,7 +510,7 @@ function buildQuote(payload, currentSession) {
         lineDiscounts.push(lineDiscount);
         baseLines.push({
             productId: String(row.id),
-            name: String(row.name),
+            name: row.color ? `${row.name} · ${row.color}` : String(row.name),
             sku: String(row.sku),
             unit: String(row.unit),
             saleUnit,
@@ -551,8 +735,9 @@ CREATE TABLE IF NOT EXISTS categories (
 
 CREATE TABLE IF NOT EXISTS products (
   id TEXT PRIMARY KEY,
-  sku TEXT NOT NULL UNIQUE,
+  sku TEXT NOT NULL,
   name TEXT NOT NULL,
+  color TEXT NOT NULL DEFAULT '',
   search_text TEXT NOT NULL DEFAULT '',
   category_id TEXT,
   unit TEXT NOT NULL DEFAULT 'un',
@@ -728,7 +913,8 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
+CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_products_variant ON products(sku COLLATE NOCASE, name COLLATE NOCASE, color COLLATE NOCASE) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_products_search ON products(search_text);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
 CREATE INDEX IF NOT EXISTS idx_products_active ON products(active, deleted_at);
@@ -807,8 +993,69 @@ async function migrate() {
           FROM sale_payments_v2 ORDER BY rowid;
         DROP TABLE sale_payments_v2;
       `);
-            db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-            run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)", [SCHEMA_VERSION, nowIso()]);
+            db.exec("PRAGMA user_version = 3");
+            run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)", [3, nowIso()]);
+            db.exec("COMMIT");
+        }
+        catch (error) {
+            db.exec("ROLLBACK");
+            throw error;
+        }
+    }
+    if (Number(one("PRAGMA user_version")?.user_version ?? 0) === 3) {
+        const backup = sqlite3.capi.sqlite3_js_db_export(db.pointer).slice();
+        const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "");
+        await writeBackupFile(`pre-migrate-v3-${stamp}.db`, backup);
+        db.exec("BEGIN IMMEDIATE");
+        try {
+            db.exec(`
+        CREATE TABLE products_v4 (
+          id TEXT PRIMARY KEY,
+          sku TEXT NOT NULL,
+          name TEXT NOT NULL,
+          color TEXT NOT NULL DEFAULT '',
+          search_text TEXT NOT NULL DEFAULT '',
+          category_id TEXT,
+          unit TEXT NOT NULL DEFAULT 'un',
+          price_cents INTEGER NOT NULL DEFAULT 0,
+          package_qty_milli INTEGER NOT NULL DEFAULT 0,
+          package_price_cents INTEGER NOT NULL DEFAULT 0,
+          half_package_price_cents INTEGER NOT NULL DEFAULT 0,
+          sell_by_unit INTEGER NOT NULL DEFAULT 1,
+          sell_by_package INTEGER NOT NULL DEFAULT 0,
+          sell_by_half_package INTEGER NOT NULL DEFAULT 0,
+          cost_cents INTEGER NOT NULL DEFAULT 0,
+          tax_rate_bp INTEGER NOT NULL DEFAULT 1600,
+          track_stock INTEGER NOT NULL DEFAULT 1,
+          stock_on_hand_milli INTEGER NOT NULL DEFAULT 0,
+          low_stock_threshold_milli INTEGER NOT NULL DEFAULT 0,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          deleted_at TEXT
+        );
+        INSERT INTO products_v4 (
+          id, sku, name, color, search_text, category_id, unit, price_cents, package_qty_milli,
+          package_price_cents, half_package_price_cents, sell_by_unit, sell_by_package,
+          sell_by_half_package, cost_cents, tax_rate_bp, track_stock, stock_on_hand_milli,
+          low_stock_threshold_milli, active, created_at, updated_at, deleted_at
+        )
+        SELECT
+          id, sku, name, '', search_text, category_id, unit, price_cents, package_qty_milli,
+          package_price_cents, half_package_price_cents, sell_by_unit, sell_by_package,
+          sell_by_half_package, cost_cents, tax_rate_bp, track_stock, stock_on_hand_milli,
+          low_stock_threshold_milli, active, created_at, updated_at, deleted_at
+        FROM products;
+        DROP TABLE products;
+        ALTER TABLE products_v4 RENAME TO products;
+        CREATE INDEX idx_products_sku ON products(sku);
+        CREATE UNIQUE INDEX idx_products_variant ON products(sku COLLATE NOCASE, name COLLATE NOCASE, color COLLATE NOCASE) WHERE deleted_at IS NULL;
+        CREATE INDEX idx_products_search ON products(search_text);
+        CREATE INDEX idx_products_category ON products(category_id);
+        CREATE INDEX idx_products_active ON products(active, deleted_at);
+        PRAGMA user_version = 4;
+      `);
+            run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)", [4, nowIso()]);
             db.exec("COMMIT");
         }
         catch (error) {
@@ -820,6 +1067,9 @@ async function migrate() {
 async function ensureDb() {
     if (db)
         return;
+    if (!self_.crossOriginIsolated || typeof SharedArrayBuffer === "undefined") {
+        fail("CROSS_ORIGIN_ISOLATION_REQUIRED", "A base local requer isolamento cross-origin. Confirme os cabeçalhos COOP/COEP no alojamento e recarregue a aplicação.");
+    }
     if (!sqlite3) {
         const url = new URL("../sqlite/index.mjs", self_.location.href).href;
         const module = await import(/* webpackIgnore: true */ url);
@@ -883,6 +1133,34 @@ async function writeBackupFile(name, bytes) {
     const writable = await handle.createWritable();
     await writable.write(bytes);
     await writable.close();
+}
+async function pruneAutoBackups(now) {
+    const root = await navigator.storage.getDirectory();
+    const dir = await root.getDirectoryHandle("backups", { create: true });
+    const autoBackups = [];
+    for await (const [name, handle] of dir.entries()) {
+        if (handle.kind !== "file" || !String(name).startsWith("auto-") || !String(name).endsWith(".db"))
+            continue;
+        const file = await handle.getFile();
+        autoBackups.push({ name: String(name), lastModified: Number(file.lastModified) });
+    }
+    autoBackups.sort((a, b) => b.lastModified - a.lastModified);
+    const keep = new Set(autoBackups
+        .filter((backup) => backup.lastModified >= now - AUTO_BACKUP_RETENTION_MS)
+        .slice(0, 28)
+        .map((backup) => backup.name));
+    const weekMs = 7 * 24 * 60 * 60 * 1000;
+    for (let week = 1; week <= 4; week += 1) {
+        const upperBound = now - week * weekMs;
+        const lowerBound = now - (week + 1) * weekMs;
+        const weekly = autoBackups.find((backup) => backup.lastModified < upperBound && backup.lastModified >= lowerBound);
+        if (weekly)
+            keep.add(weekly.name);
+    }
+    for (const backup of autoBackups) {
+        if (!keep.has(backup.name))
+            await dir.removeEntry(backup.name);
+    }
 }
 async function listBackups() {
     try {
@@ -1231,6 +1509,36 @@ async function exportBackup() {
     audit("backup.exported", "backup", null, null, { filename, size: copy.byteLength, user: current.username });
     return { bytes: copy.buffer, filename, size: copy.byteLength };
 }
+async function createAutoBackup() {
+    await ensureDb();
+    if (isSetupRequired())
+        return { created: false, lastAutoBackupAt: null };
+    const previous = meta("last_auto_backup_at");
+    const previousTime = previous ? Date.parse(previous) : Number.NaN;
+    const now = Date.now();
+    if (Number.isFinite(previousTime) && now >= previousTime && now - previousTime < AUTO_BACKUP_INTERVAL_MS) {
+        return { created: false, lastAutoBackupAt: previous };
+    }
+    if (!db)
+        fail("DB_NOT_READY", "A base não está aberta.");
+    const timestamp = new Date(now);
+    const stamp = timestamp.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z").replace("T", "-");
+    const filename = `auto-${stamp}.db`;
+    const copy = sqlite3.capi.sqlite3_js_db_export(db.pointer).slice();
+    await writeBackupFile(filename, copy);
+    await pruneAutoBackups(now);
+    const createdAt = timestamp.toISOString();
+    setMeta("last_auto_backup_at", createdAt);
+    run("INSERT INTO backup_log (id, created_at, method, size_bytes, note, schema_version) VALUES (?, ?, 'auto', ?, ?, ?)", [
+        uuid(),
+        createdAt,
+        copy.byteLength,
+        filename,
+        Number(one("PRAGMA user_version")?.user_version ?? 0),
+    ]);
+    audit("backup.auto_created", "backup", null, null, { filename, size: copy.byteLength });
+    return { created: true, lastAutoBackupAt: createdAt };
+}
 async function importBackup(payload) {
     const current = requireSession(["owner"]);
     await ensureDb();
@@ -1460,27 +1768,38 @@ async function handleRequest(req) {
         }
         case "product.list": {
             requireSession();
-            const query = norm(payload.query);
-            const categoryId = payload.categoryId ? String(payload.categoryId) : null;
-            const binds = [];
-            let where = "WHERE p.deleted_at IS NULL";
-            if (payload.activeOnly !== false)
-                where += " AND p.active = 1";
-            if (categoryId) {
-                where += " AND p.category_id = ?";
-                binds.push(categoryId);
-            }
-            if (query) {
-                where += " AND (p.search_text LIKE ? OR p.sku LIKE ? OR EXISTS (SELECT 1 FROM product_barcodes b WHERE b.product_id = p.id AND b.barcode LIKE ?))";
-                binds.push(`%${query}%`, `%${query}%`, `%${query}%`);
-            }
-            return { data: productRows(`${where} ORDER BY p.name LIMIT 200`, binds).map(toProduct) };
+            const { where, bind } = productFilter(payload);
+            return { data: productRows(`${where} ORDER BY p.name LIMIT 200`, bind).map(toProduct) };
+        }
+        case "product.page": {
+            requireSession();
+            const { where, bind, query } = productFilter(payload);
+            const total = Number(one(`SELECT COUNT(*) AS total FROM products p LEFT JOIN categories c ON c.id = p.category_id ${where}`, bind)?.total ?? 0);
+            const requested = paginationInput(payload);
+            const page = resolvePage(requested.page, requested.pageSize, total);
+            const barcodeSort = query
+                ? "ORDER BY CASE WHEN EXISTS (SELECT 1 FROM product_barcodes exact_barcode WHERE exact_barcode.product_id = p.id AND exact_barcode.barcode = ?) THEN 0 ELSE 1 END, p.name, p.id"
+                : "ORDER BY p.name, p.id";
+            const pageBind = query ? [...bind, query, requested.pageSize, (page - 1) * requested.pageSize] : [...bind, requested.pageSize, (page - 1) * requested.pageSize];
+            return {
+                data: {
+                    items: productRows(`${where} ${barcodeSort} LIMIT ? OFFSET ?`, pageBind).map(toProduct),
+                    page,
+                    pageSize: requested.pageSize,
+                    total,
+                },
+            };
         }
         case "product.upsert": {
             const current = requireSession(["owner", "manager"]);
             const name = String(payload.name ?? "").trim();
             if (!name)
                 fail("VALIDATION", "Indique o nome do produto.");
+            const color = String(payload.color ?? "").trim();
+            if (!color)
+                fail("VALIDATION", "Indique a cor do produto.");
+            if (color.length > 60)
+                fail("VALIDATION", "A cor do produto deve ter no máximo 60 caracteres.");
             const price = Math.max(0, Math.trunc(Number(payload.priceCents ?? 0)));
             const cost = Math.max(0, Math.trunc(Number(payload.costCents ?? 0)));
             const unit = String(payload.unit ?? "un");
@@ -1510,7 +1829,7 @@ async function handleRequest(req) {
             const sku = String(payload.sku ?? "").trim() || `P-${uuid().slice(0, 6).toUpperCase()}`;
             const now = nowIso();
             const id = payload.id ? String(payload.id) : uuid();
-            const searchText = norm(`${name} ${sku} ${barcodes.join(" ")} ${String(payload.categoryName ?? "")}`);
+            const searchText = norm(`${name} ${sku} ${color} ${barcodes.join(" ")} ${String(payload.categoryName ?? "")}`);
             db.exec("BEGIN IMMEDIATE");
             try {
                 const before = payload.id ? one("SELECT * FROM products WHERE id = ?", [id]) : null;
@@ -1523,9 +1842,10 @@ async function handleRequest(req) {
                             fail("UNIT_IMMUTABLE", "A unidade-base não pode ser alterada depois de registar stock ou vendas. Crie um produto novo.");
                         }
                     }
-                    run(`UPDATE products SET sku = ?, name = ?, search_text = ?, category_id = ?, unit = ?, price_cents = ?, package_qty_milli = ?, package_price_cents = ?, half_package_price_cents = ?, sell_by_unit = ?, sell_by_package = ?, sell_by_half_package = ?, cost_cents = ?, tax_rate_bp = ?, track_stock = ?, low_stock_threshold_milli = ?, active = ?, updated_at = ? WHERE id = ?`, [
+                    run(`UPDATE products SET sku = ?, name = ?, color = ?, search_text = ?, category_id = ?, unit = ?, price_cents = ?, package_qty_milli = ?, package_price_cents = ?, half_package_price_cents = ?, sell_by_unit = ?, sell_by_package = ?, sell_by_half_package = ?, cost_cents = ?, tax_rate_bp = ?, track_stock = ?, low_stock_threshold_milli = ?, active = ?, updated_at = ? WHERE id = ?`, [
                         sku,
                         name,
+                        color,
                         searchText,
                         payload.categoryId || null,
                         unit,
@@ -1546,11 +1866,12 @@ async function handleRequest(req) {
                     ]);
                 }
                 else {
-                    run(`INSERT INTO products (id, sku, name, search_text, category_id, unit, price_cents, package_qty_milli, package_price_cents, half_package_price_cents, sell_by_unit, sell_by_package, sell_by_half_package, cost_cents, tax_rate_bp, track_stock, stock_on_hand_milli, low_stock_threshold_milli, active, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`, [
+                    run(`INSERT INTO products (id, sku, name, color, search_text, category_id, unit, price_cents, package_qty_milli, package_price_cents, half_package_price_cents, sell_by_unit, sell_by_package, sell_by_half_package, cost_cents, tax_rate_bp, track_stock, stock_on_hand_milli, low_stock_threshold_milli, active, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`, [
                         id,
                         sku,
                         name,
+                        color,
                         searchText,
                         payload.categoryId || null,
                         unit,
@@ -1577,6 +1898,7 @@ async function handleRequest(req) {
                 audit(before ? "product.updated" : "product.created", "product", id, before ? toProduct(before) : null, {
                     name,
                     sku,
+                    color,
                     unit,
                     priceCents: price,
                     packageQtyMilli,
@@ -1694,10 +2016,10 @@ async function handleRequest(req) {
             if (!productId)
                 fail("VALIDATION", "Indique o produto.");
             return {
-                data: rows(`SELECT m.*, p.name AS product_name, u.display_name AS user_name FROM stock_movements m JOIN products p ON p.id = m.product_id LEFT JOIN users u ON u.id = m.user_id WHERE m.product_id = ? ORDER BY m.created_at DESC LIMIT 100`, [productId]).map((row) => ({
+                data: rows(`SELECT m.*, p.name AS product_name, p.color AS product_color, u.display_name AS user_name FROM stock_movements m JOIN products p ON p.id = m.product_id LEFT JOIN users u ON u.id = m.user_id WHERE m.product_id = ? ORDER BY m.created_at DESC LIMIT 100`, [productId]).map((row) => ({
                     id: String(row.id),
                     productId: String(row.product_id),
-                    productName: String(row.product_name),
+                    productName: row.product_color ? `${row.product_name} · ${row.product_color}` : String(row.product_name),
                     type: String(row.type),
                     qtyMilli: Number(row.qty_milli),
                     balanceAfterMilli: Number(row.balance_after_milli),
@@ -1710,10 +2032,42 @@ async function handleRequest(req) {
                 })),
             };
         }
+        case "stock.history.page": {
+            requireSession();
+            const productId = String(payload.productId ?? "");
+            if (!productId)
+                fail("VALIDATION", "Indique o produto.");
+            const total = Number(one("SELECT COUNT(*) AS total FROM stock_movements WHERE product_id = ?", [productId])?.total ?? 0);
+            const requested = paginationInput(payload, 25);
+            const page = resolvePage(requested.page, requested.pageSize, total);
+            const movements = rows(`SELECT m.*, p.name AS product_name, p.color AS product_color, u.display_name AS user_name
+         FROM stock_movements m JOIN products p ON p.id = m.product_id LEFT JOIN users u ON u.id = m.user_id
+         WHERE m.product_id = ? ORDER BY m.created_at DESC, m.rowid DESC LIMIT ? OFFSET ?`, [productId, requested.pageSize, (page - 1) * requested.pageSize]).map((row) => ({
+                id: String(row.id),
+                productId: String(row.product_id),
+                productName: row.product_color ? `${row.product_name} · ${row.product_color}` : String(row.product_name),
+                type: String(row.type),
+                qtyMilli: Number(row.qty_milli),
+                balanceAfterMilli: Number(row.balance_after_milli),
+                unitCostCents: row.unit_cost_cents === null ? null : Number(row.unit_cost_cents),
+                supplierName: row.supplier_name_snapshot ? String(row.supplier_name_snapshot) : null,
+                documentRef: row.document_ref ? String(row.document_ref) : null,
+                reason: row.reason ? String(row.reason) : null,
+                createdAt: String(row.created_at),
+                userName: row.user_name ? String(row.user_name) : null,
+            }));
+            return {
+                data: { items: movements, page, pageSize: requested.pageSize, total },
+            };
+        }
         case "stock.low": {
             requireSession();
             return { data: lowStockProducts() };
         }
+        case "stock.import.preview":
+            return { data: previewStockImport(payload.items) };
+        case "stock.import.commit":
+            return { data: commitStockImport(payload) };
         case "customer.list": {
             requireSession();
             const query = norm(payload.query);
@@ -1734,6 +2088,27 @@ async function handleRequest(req) {
                     notes: String(row.notes),
                 })),
             };
+        }
+        case "customer.page": {
+            requireSession();
+            const query = norm(payload.query);
+            const where = query
+                ? "WHERE deleted_at IS NULL AND (lower(name) LIKE ? OR phone_normalized LIKE ? OR nif LIKE ?)"
+                : "WHERE deleted_at IS NULL";
+            const binds = query ? [`%${query}%`, `%${query}%`, `%${query}%`] : [];
+            const total = Number(one(`SELECT COUNT(*) AS total FROM customers ${where}`, binds)?.total ?? 0);
+            const requested = paginationInput(payload, 12);
+            const page = resolvePage(requested.page, requested.pageSize, total);
+            const items = rows(`SELECT * FROM customers ${where} ORDER BY name, id LIMIT ? OFFSET ?`, [...binds, requested.pageSize, (page - 1) * requested.pageSize]).map((row) => ({
+                id: String(row.id),
+                name: String(row.name),
+                phone: String(row.phone),
+                nif: String(row.nif),
+                email: String(row.email),
+                address: String(row.address),
+                notes: String(row.notes),
+            }));
+            return { data: { items, page, pageSize: requested.pageSize, total } };
         }
         case "customer.upsert": {
             const current = requireSession();
@@ -1809,6 +2184,29 @@ async function handleRequest(req) {
                 })),
             };
         }
+        case "supplier.page": {
+            requireSession();
+            const query = norm(payload.query);
+            const where = query
+                ? "WHERE deleted_at IS NULL AND (lower(name) LIKE ? OR lower(contact_name) LIKE ? OR nif LIKE ?)"
+                : "WHERE deleted_at IS NULL";
+            const binds = query ? [`%${query}%`, `%${query}%`, `%${query}%`] : [];
+            const total = Number(one(`SELECT COUNT(*) AS total FROM suppliers ${where}`, binds)?.total ?? 0);
+            const requested = paginationInput(payload, 12);
+            const page = resolvePage(requested.page, requested.pageSize, total);
+            const items = rows(`SELECT * FROM suppliers ${where} ORDER BY name, id LIMIT ? OFFSET ?`, [...binds, requested.pageSize, (page - 1) * requested.pageSize]).map((row) => ({
+                id: String(row.id),
+                name: String(row.name),
+                contactName: String(row.contact_name),
+                phone: String(row.phone),
+                nif: String(row.nif),
+                email: String(row.email),
+                address: String(row.address),
+                notes: String(row.notes),
+                active: toBool(row.active),
+            }));
+            return { data: { items, page, pageSize: requested.pageSize, total } };
+        }
         case "supplier.upsert": {
             const current = requireSession(["owner", "manager"]);
             const name = String(payload.name ?? "").trim();
@@ -1865,6 +2263,51 @@ async function handleRequest(req) {
         }
         case "sale.complete":
             return { data: await completeSale(payload) };
+        case "sale.page": {
+            requireSession();
+            const query = norm(payload.query);
+            const binds = [];
+            let where = "WHERE 1 = 1";
+            if (query) {
+                where += " AND (lower(s.receipt_number) LIKE ? OR lower(s.customer_name_snapshot) LIKE ?)";
+                binds.push(`%${query}%`, `%${query}%`);
+            }
+            if (payload.from) {
+                where += " AND s.created_at >= ?";
+                binds.push(String(payload.from));
+            }
+            if (payload.to) {
+                where += " AND s.created_at < ?";
+                binds.push(String(payload.to));
+            }
+            const summary = one(`SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN s.status = 'completed' THEN s.total_cents ELSE 0 END), 0) AS completed_total
+         FROM sales s ${where}`, binds);
+            const total = Number(summary?.total ?? 0);
+            const requested = paginationInput(payload, 25);
+            const page = resolvePage(requested.page, requested.pageSize, total);
+            const pageBinds = [...binds, requested.pageSize, (page - 1) * requested.pageSize];
+            const items = rows(`SELECT s.id, s.receipt_number, s.status, s.cashier_name_snapshot, s.customer_name_snapshot, s.total_cents, s.created_at,
+                (SELECT COUNT(*) FROM sale_items WHERE sale_id = s.id) AS item_count
+         FROM sales s ${where} ORDER BY s.created_at DESC, s.rowid DESC LIMIT ? OFFSET ?`, pageBinds).map((row) => ({
+                id: String(row.id),
+                receiptNumber: String(row.receipt_number),
+                status: row.status,
+                cashierName: String(row.cashier_name_snapshot),
+                customerName: row.customer_name_snapshot ? String(row.customer_name_snapshot) : null,
+                totalCents: Number(row.total_cents),
+                createdAt: String(row.created_at),
+                itemCount: Number(row.item_count),
+            }));
+            return {
+                data: {
+                    items,
+                    page,
+                    pageSize: requested.pageSize,
+                    total,
+                    completedTotalCents: Number(summary?.completed_total ?? 0),
+                },
+            };
+        }
         case "sale.list": {
             requireSession();
             const query = norm(payload.query);
@@ -1949,15 +2392,62 @@ async function handleRequest(req) {
                 })),
             };
         }
+        case "audit.page": {
+            requireSession(["owner", "manager"]);
+            const query = norm(payload.query);
+            const actionMatches = Array.isArray(payload.actionMatches)
+                ? payload.actionMatches.map((action) => String(action)).slice(0, 100)
+                : [];
+            const binds = [];
+            let where = "";
+            if (query || actionMatches.length > 0) {
+                const predicates = [
+                    "lower(a.action) LIKE ?",
+                    "lower(a.entity_type) LIKE ?",
+                    "lower(COALESCE(a.entity_id, '')) LIKE ?",
+                    "lower(COALESCE(u.display_name, '')) LIKE ?",
+                ];
+                binds.push(...Array(4).fill(`%${query}%`));
+                if (actionMatches.length > 0) {
+                    predicates.push(`a.action IN (${actionMatches.map(() => "?").join(",")})`);
+                    binds.push(...actionMatches);
+                }
+                where = `WHERE (${predicates.join(" OR ")})`;
+            }
+            const joins = "FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id";
+            const total = Number(one(`SELECT COUNT(*) AS total ${joins} ${where}`, binds)?.total ?? 0);
+            const requested = paginationInput(payload, 25);
+            const page = resolvePage(requested.page, requested.pageSize, total);
+            const entries = rows(`SELECT a.*, u.display_name AS actor_name ${joins} ${where}
+         ORDER BY a.created_at DESC, a.rowid DESC LIMIT ? OFFSET ?`, [...binds, requested.pageSize, (page - 1) * requested.pageSize]).map((row) => ({
+                id: String(row.id),
+                actorName: row.actor_name ? String(row.actor_name) : null,
+                action: String(row.action),
+                entityType: String(row.entity_type),
+                entityId: row.entity_id ? String(row.entity_id) : null,
+                createdAt: String(row.created_at),
+                beforeJson: row.before_json ? String(row.before_json) : null,
+                afterJson: row.after_json ? String(row.after_json) : null,
+            }));
+            return {
+                data: { items: entries, page, pageSize: requested.pageSize, total },
+            };
+        }
         case "backup.info": {
             requireSession(["owner", "manager"]);
-            const info = { lastBackupAt: meta("last_backup_at"), backups: await listBackups() };
+            const info = {
+                lastBackupAt: meta("last_backup_at"),
+                lastAutoBackupAt: meta("last_auto_backup_at"),
+                backups: await listBackups(),
+            };
             return { data: info };
         }
         case "backup.export": {
             const result = await exportBackup();
             return { data: result, transfer: [result.bytes] };
         }
+        case "backup.auto":
+            return { data: await createAutoBackup() };
         case "backup.import":
             return { data: await importBackup(payload) };
         default:

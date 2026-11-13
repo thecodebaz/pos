@@ -75,7 +75,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <BrandBlock storeName={session.settings.storeName} />
         <nav className="mt-4 flex flex-1 flex-col gap-0.5">
           {items.map((item) => (
-            <NavLink key={item.href} href={item.href} label={item.label} active={pathname === item.href}>
+            <NavLink
+              key={item.href}
+              href={item.href}
+              label={item.label}
+              active={pathname === item.href || (item.href === "/stock/" && pathname.startsWith("/stock/"))}
+            >
               <item.icon className="size-4" />
             </NavLink>
           ))}
@@ -105,7 +110,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {menuOpen ? (
           <nav className="no-print grid grid-cols-2 gap-1 border-b bg-sidebar p-2 sm:grid-cols-3 lg:hidden">
             {items.map((item) => (
-              <NavLink key={item.href} href={item.href} label={item.label} active={pathname === item.href}>
+              <NavLink
+                key={item.href}
+                href={item.href}
+                label={item.label}
+                active={pathname === item.href || (item.href === "/stock/" && pathname.startsWith("/stock/"))}
+              >
                 <item.icon className="size-4" />
               </NavLink>
             ))}

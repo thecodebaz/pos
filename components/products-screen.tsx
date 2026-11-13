@@ -18,6 +18,7 @@ const PAGE_SIZE = 25;
 type FormState = {
   id?: string;
   name: string;
+  color: string;
   sku: string;
   barcodes: string;
   categoryId: string;
@@ -39,6 +40,7 @@ type FormState = {
 
 const emptyForm: FormState = {
   name: "",
+  color: "",
   sku: "",
   barcodes: "",
   categoryId: "",
@@ -111,6 +113,7 @@ export function ProductsScreen() {
     setForm({
       id: product.id,
       name: product.name,
+      color: product.color,
       sku: product.sku,
       barcodes: product.barcodes.join(", "),
       categoryId: product.categoryId ?? "",
@@ -141,6 +144,7 @@ export function ProductsScreen() {
       await call("product.upsert", {
         id: form.id,
         name: form.name,
+        color: form.color,
         sku: form.sku,
         barcodes: form.barcodes.split(",").map((value) => value.trim()).filter(Boolean),
         categoryId: form.categoryId || null,
@@ -241,6 +245,7 @@ export function ProductsScreen() {
                               {product.sku}
                               {product.barcodes.length > 0 ? ` · ${product.barcodes.join(", ")}` : ""}
                             </p>
+                            <p className="text-xs text-muted-foreground">Cor: {product.color || "por indicar"}</p>
                           </div>
                         </div>
                       </TableCell>
@@ -298,6 +303,9 @@ export function ProductsScreen() {
           <form className="grid gap-3 sm:grid-cols-2" onSubmit={save}>
             <Field label="Nome *" htmlFor="productName" className="sm:col-span-2">
               <Input id="productName" required autoFocus value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+            </Field>
+            <Field label="Cor *" htmlFor="productColor">
+              <Input id="productColor" required maxLength={60} value={form.color} onChange={(event) => setForm({ ...form, color: event.target.value })} />
             </Field>
             <Field label="SKU / referência" htmlFor="productSku" hint="Deixe vazio para gerar automaticamente.">
               <Input id="productSku" value={form.sku} onChange={(event) => setForm({ ...form, sku: event.target.value })} />

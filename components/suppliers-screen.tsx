@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Pencil, Plus, Search, Trash2, Truck } from "lucide-react";
 import { useApp, errorMessage } from "@/lib/app-context";
-import type { Supplier } from "@/lib/db/protocol";
+import type { PagedResult, Supplier } from "@/lib/db/protocol";
 import { Badge, EmptyState, Field, LoadingPanel, Note, PageHeader } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,6 +29,7 @@ const emptyForm: FormState = { name: "", contactName: "", phone: "", nif: "", em
 export function SuppliersScreen() {
   const { call, toast } = useApp();
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -38,22 +39,24 @@ export function SuppliersScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
-      setSuppliers(await call<Supplier[]>("supplier.list", { query }));
+      const result = await call<PagedResult<Supplier>>("supplier.page", { query, page, pageSize: PAGE_SIZE });
+      setSuppliers(result.items);
+      setTotal(result.total);
+      if (result.page !== page) setPage(result.page);
     } catch (err) {
       toast(errorMessage(err), "error");
     } finally {
       setLoading(false);
     }
-  }, [call, query, toast]);
+  }, [call, page, query, toast]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void load(), 200);
+    const timer = window.setTimeout(() => void load(), query ? 200 : 0);
     return () => window.clearTimeout(timer);
-  }, [load]);
-  const pageCount = Math.max(1, Math.ceil(suppliers.length / PAGE_SIZE));
-  const currentPage = Math.min(page, pageCount);
-  const visibleSuppliers = suppliers.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  }, [load, query]);
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(total / PAGE_SIZE)));
 
   async function save(event: React.FormEvent) {
     event.preventDefault();
@@ -113,7 +116,7 @@ export function SuppliersScreen() {
       ) : (
         <>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-            {visibleSuppliers.map((supplier) => (
+            {suppliers.map((supplier) => (
               <div key={supplier.id} className="rounded-xl bg-card p-4 ring-1 ring-foreground/10">
                 <div className="flex items-start gap-3">
                   <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-muted">
@@ -150,7 +153,7 @@ export function SuppliersScreen() {
             ))}
           </div>
           <div className="mt-3">
-            <PaginationControls page={currentPage} pageSize={PAGE_SIZE} total={suppliers.length} itemLabel="fornecedores" onPageChange={setPage} />
+            <PaginationControls page={currentPage} pageSize={PAGE_SIZE} total={total} itemLabel="fornecedores" onPageChange={setPage} />
           </div>
         </>
       )}

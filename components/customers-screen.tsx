@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Pencil, Plus, Search, Trash2, UserRound, Phone } from "lucide-react";
 import { useApp, errorMessage } from "@/lib/app-context";
-import type { Customer } from "@/lib/db/protocol";
+import type { Customer, PagedResult } from "@/lib/db/protocol";
 import { EmptyState, Field, LoadingPanel, Note, PageHeader } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,6 +28,7 @@ const emptyForm: FormState = { name: "", phone: "", altPhone: "", nif: "", email
 export function CustomersScreen() {
   const { session, call, toast } = useApp();
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -39,28 +40,25 @@ export function CustomersScreen() {
   const canDelete = session?.user.role === "owner" || session?.user.role === "manager";
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
-      setCustomers(await call<Customer[]>("customer.list", { query }));
+      const result = await call<PagedResult<Customer>>("customer.page", { query, page, pageSize: PAGE_SIZE });
+      setCustomers(result.items);
+      setTotal(result.total);
+      if (result.page !== page) setPage(result.page);
     } catch (err) {
       toast(errorMessage(err), "error");
     } finally {
       setLoading(false);
     }
-  }, [call, query, toast]);
+  }, [call, page, query, toast]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void load(), 200);
+    const timer = window.setTimeout(() => void load(), query ? 200 : 0);
     return () => window.clearTimeout(timer);
-  }, [load]);
+  }, [load, query]);
 
-  const filtered = useMemo(() => {
-    const text = query.toLowerCase().trim();
-    if (!text) return customers;
-    return customers.filter((customer) => `${customer.name} ${customer.phone} ${customer.nif}`.toLowerCase().includes(text));
-  }, [customers, query]);
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const currentPage = Math.min(page, pageCount);
-  const visibleCustomers = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(total / PAGE_SIZE)));
 
   async function save(event: React.FormEvent) {
     event.preventDefault();
@@ -115,12 +113,12 @@ export function CustomersScreen() {
 
       {loading ? (
         <LoadingPanel />
-      ) : filtered.length === 0 ? (
+      ) : customers.length === 0 ? (
         <EmptyState title="Sem clientes" description="Adicione clientes para associar vendas e histórico." />
       ) : (
         <>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-            {visibleCustomers.map((customer) => (
+            {customers.map((customer) => (
               <div key={customer.id} className="rounded-xl bg-card p-4 ring-1 ring-foreground/10">
                 <div className="flex items-start gap-3">
                   <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-muted">
@@ -160,7 +158,7 @@ export function CustomersScreen() {
             ))}
           </div>
           <div className="mt-3">
-            <PaginationControls page={currentPage} pageSize={PAGE_SIZE} total={filtered.length} itemLabel="clientes" onPageChange={setPage} />
+            <PaginationControls page={currentPage} pageSize={PAGE_SIZE} total={total} itemLabel="clientes" onPageChange={setPage} />
           </div>
         </>
       )}

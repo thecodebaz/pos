@@ -14,7 +14,7 @@ const nextConfig: NextConfig = {
   output: "export",
   trailingSlash: true,
   images: { unoptimized: true },
-  // O export estático não suporta headers(); em dev o Next aplica-os.
+  // O export estático não suporta headers(); em produção, vercel.json define-os.
   ...(process.env.NODE_ENV === "development"
     ? {
         async headers() {

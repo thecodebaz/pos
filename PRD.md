@@ -417,7 +417,8 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-CAT-11 | Histórico de preços por produto. | S |
 | RF-CAT-12 | Importação/exportação CSV de produtos. | C |
 | RF-CAT-13 | Imagens de produto. | W |
-| RF-CAT-14 | Variantes (tamanho/cor) no mesmo produto; usar SKUs separados no MVP. | W |
+| RF-CAT-14 | Variantes (tamanho/cor) como produtos de stock distintos; o SKU do fornecedor pode repetir, distinguindo variantes por SKU, nome e cor. | M |
+| RF-CAT-17 | Todos os produtos novos exigem cor; o POS e o histórico distinguem variantes pela cor mesmo quando o SKU se repete. | M |
 | RF-CAT-15 | Ações em massa (ativar/desativar/categoria). | S |
 | RF-CAT-16 | Produtos configuráveis para venda por unidade-base, pacote e meia embalagem, com conteúdo por pacote, formatos activáveis e preço próprio para cada formato. As vendas guardam snapshots de formato, quantidade e preço. | M |
 
@@ -437,6 +438,7 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-STK-10 | Custo do produto é atualizado para o último custo de entrada; não há FIFO nem custo médio no MVP. | S |
 | RF-STK-11 | Stock negativo é mostrado com destaque no catálogo e no POS. | M |
 | RF-STK-12 | Entradas de compra podem ser registadas por pacote e convertidas para a unidade-base configurada no produto; o livro de movimentos e os saldos permanecem na unidade-base. | M |
+| RF-STK-13 | Importar Excel a partir da linha 6 (B SKU, C nome, E cor, J quantidade, K custo unitário, L valor), rever produtos novos/existentes, preços de venda em falta e taxa Rand→MZN; assinalar divergências entre K×J e L e exigir confirmação explícita; confirmar criação de produtos e movimentos de stock numa operação atómica. | M |
 
 ### 9.6 Clientes
 
@@ -548,7 +550,7 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-BKP-04 | Antes de importar, criar backup automático da base atual. | M |
 | RF-BKP-05 | Lembrar o utilizador se o último backup tiver mais de 24 h ou 50 vendas. | M |
 | RF-BKP-06 | Mostrar “último backup” no cabeçalho e nas definições. | M |
-| RF-BKP-07 | Backup automático diário para uma pasta OPFS `backups/`. | S |
+| RF-BKP-07 | Backup automático a cada 6 horas, enquanto a app estiver aberta, para uma pasta OPFS `backups/`; verificar e criar ao reabrir se estiver vencido. | S |
 | RF-BKP-08 | Backup para pasta escolhida pelo utilizador via File System Access API (Chromium). | S |
 | RF-BKP-09 | Exportação opcional encriptada com passphrase (AES-GCM + PBKDF2). | S |
 | RF-BKP-10 | Importação nunca corre com uma venda em curso. | M |
@@ -1018,7 +1020,7 @@ public/
 | `recovery_codes` | `id`, `user_id`, `hash`, `salt`, `iterations`, `created_at`, `used_at`, `rotated_at` | Apenas para o proprietário |
 | `settings` | `id TEXT PK CHECK(id='default')`, `store_name`, `nif`, `address`, `phone`, `currency`, `tax_rate_bp`, `receipt_footer`, `installation_code`, `allow_negative_stock`, `max_cashier_discount_bp`, `idle_lock_seconds`, `created_at`, `updated_at` | Uma linha |
 | `categories` | `id`, `name`, `sort_order`, `created_at`, `updated_at`, `deleted_at` |  |
-| `products` | `id`, `sku UNIQUE`, `name`, `search_text`, `category_id`, `unit`, `price_cents`, `package_qty_milli`, `package_price_cents`, `half_package_price_cents`, `sell_by_unit`, `sell_by_package`, `sell_by_half_package`, `cost_cents`, `tax_rate_bp`, `track_stock`, `stock_on_hand_milli`, `low_stock_threshold_milli`, `active`, `created_at`, `updated_at`, `deleted_at` | Stock e custo na unidade-base; `search_text` normalizado |
+| `products` | `id`, `sku`, `name`, `color`, `search_text`, `category_id`, `unit`, `price_cents`, `package_qty_milli`, `package_price_cents`, `half_package_price_cents`, `sell_by_unit`, `sell_by_package`, `sell_by_half_package`, `cost_cents`, `tax_rate_bp`, `track_stock`, `stock_on_hand_milli`, `low_stock_threshold_milli`, `active`, `created_at`, `updated_at`, `deleted_at` | Variantes activas únicas por SKU/nome/cor; stock e custo na unidade-base |
 | `product_barcodes` | `id`, `product_id`, `barcode UNIQUE`, `is_primary` | Vários por produto |
 | `customers` | `id`, `name`, `phone`, `phone_normalized`, `alt_phone`, `nif`, `email`, `address`, `notes`, `created_at`, `updated_at`, `deleted_at` |  |
 | `suppliers` | `id`, `name`, `contact_name`, `phone`, `nif`, `email`, `address`, `notes`, `active`, `created_at`, `updated_at`, `deleted_at` |  |
@@ -1131,8 +1133,8 @@ Sem servidor, **o `.db` do OPFS é a única cópia dos dados**. Limpar os dados 
 
 ### 14.4 Backups automáticos locais
 
-- Diariamente, se a app estiver aberta, o worker cria `backups/auto-YYYYMMDD.db` via `VACUUM INTO`.
-- Reter 7 diários + 4 semanais.
+- A cada 6 horas, se a app estiver aberta, o worker cria uma cópia em `backups/auto-*.db`; ao reabrir, cria uma cópia se o intervalo tiver vencido.
+- Reter até 28 cópias recentes (7 dias, à cadência de 6 horas) + 4 cópias semanais anteriores.
 - Estes backups vivem no mesmo OPFS; **não protegem contra limpeza dos dados do site**. Servem para erros de importação/migração.
 - O utilizador deve exportar para fora do dispositivo.
 
@@ -1332,6 +1334,11 @@ Documento não fiscal.
 | Bundle inicial JS (gzip) | < 300 kB, excluindo WASM |
 | SQLite WASM | Carregar uma vez, em worker, com cache HTTP |
 
+As listas extensas de produtos, vendas, auditoria, movimentos de stock, clientes e
+fornecedores devem usar paginação no worker SQLite, com contagem total e filtros
+aplicados antes do limite e deslocamento. A interface deve permitir navegar entre
+páginas e manter a pesquisa/filtros activos.
+
 ### 16.2 Fiabilidade
 
 - Nenhuma venda confirmada pode perder-se.
@@ -1401,7 +1408,7 @@ Documento não fiscal.
 - Alerta quando o uso > 80% da quota.
 - Retenção local: 24 meses ou 100 000 vendas.
 - Exportação/arquivo antes de purgar (fase 2).
-- Backups automáticos limitados a 7 diários + 4 semanais.
+- Backups automáticos limitados a 28 cópias recentes (7 dias, à cadência de 6 horas) + 4 cópias semanais anteriores.
 
 ### 16.9 Manutenibilidade
 
