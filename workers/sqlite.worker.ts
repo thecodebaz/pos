@@ -773,8 +773,13 @@ function productFilter(payload: Row): { where: string; bind: unknown[]; query: s
   }
   if (payload.trackStockOnly === true) where += " AND p.track_stock = 1";
   if (query) {
-    where += " AND (p.search_text LIKE ? OR p.sku LIKE ? OR lower(p.color) LIKE ? OR lower(c.name) LIKE ? OR EXISTS (SELECT 1 FROM product_barcodes b WHERE b.product_id = p.id AND b.barcode LIKE ?))";
-    bind.push(`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`);
+    // Cada termo da pesquisa pode corresponder a um atributo diferente.
+    // Assim "rose red" encontra um produto com nome "Rose" e cor "Red".
+    const terms = query.split(/\s+/).filter(Boolean);
+    for (const term of terms) {
+      where += " AND (p.search_text LIKE ? OR p.sku LIKE ? OR lower(p.color) LIKE ? OR lower(c.name) LIKE ? OR EXISTS (SELECT 1 FROM product_barcodes b WHERE b.product_id = p.id AND b.barcode LIKE ?))";
+      bind.push(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
+    }
   }
   return { where, bind, query };
 }

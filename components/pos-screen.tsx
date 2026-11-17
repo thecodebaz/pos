@@ -8,7 +8,7 @@ import { useApp, errorMessage } from "@/lib/app-context";
 import type { CartItemInput, Customer, PagedResult, PaymentMethod, Product, Quote, Sale, SaleUnit } from "@/lib/db/protocol";
 import { PAYMENT_LABELS } from "@/lib/db/protocol";
 import { formatMzn, formatMznPlain, formatQty, formatSaleUnit, parseMzn, parseQty, qtyToInput } from "@/lib/format";
-import { Badge, EmptyState, Field, LoadingPanel, MoneyInput, Note, Select } from "@/components/shared";
+import { Badge, EmptyState, Field, MoneyInput, Note, Select } from "@/components/shared";
 import { ReceiptDialog } from "@/components/receipt";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -100,6 +100,7 @@ export function PosScreen() {
 
   const loadCatalog = useCallback(async () => {
     const seq = ++catalogSeq.current;
+    setLoading(true);
     try {
       const result = await call<PagedResult<Product>>("product.page", {
         activeOnly: true,
@@ -425,8 +426,6 @@ export function PosScreen() {
     }
   }
 
-  if (loading) return <LoadingPanel label="A carregar produtos…" />;
-
   const changeCents = !isCredit && method === "cash" ? Math.max(0, parseMzn(tenderedInput) - totalCents) : 0;
   const paidNowCents = isCredit ? Math.max(0, parseMzn(paidNowInput)) : totalCents;
   const creditRemainingCents = Math.max(0, totalCents - paidNowCents);
@@ -442,7 +441,7 @@ export function PosScreen() {
               autoFocus
               value={search}
               onChange={(event) => { setSearch(event.target.value); setProductPage(1); }}
-              placeholder="Pesquisar produto, código ou código de barras (F2)"
+              placeholder="Nome, cor, código… (ex.: rose red) — F2"
               className="h-10 pl-8"
             />
           </form>
@@ -455,6 +454,10 @@ export function PosScreen() {
             ))}
           </Select>
         </div>
+
+        <p className="mb-2 text-xs text-muted-foreground" aria-live="polite">
+          {loading ? "A actualizar…" : `${totalProducts} produto(s)`}
+        </p>
 
         {products.length === 0 ? (
           <EmptyState

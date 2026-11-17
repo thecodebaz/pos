@@ -290,7 +290,7 @@ Estas regras são **requisitos de arquitetura**, não sugestões. Qualquer PR qu
 ### 8.3 Venda no balcão
 
 1. O foco está na pesquisa/código de barras.
-2. O operador pesquisa por nome/SKU ou passa o código de barras.
+2. O operador pesquisa por nome/cor/categoria/SKU ou passa o código de barras; a pesquisa combina vários termos entre atributos (ex.: “rose red”).
 3. O produto é adicionado ao carrinho com quantidade 1; pode ajustar quantidade (incluindo decimais para kg/l).
 4. Pode associar um cliente (opcional), aplicar desconto dentro do limite e adicionar nota.
 5. Pressiona “Cobrar”; escolhe dinheiro, cartão/POS, M-Pesa, e-Mola, transferência ou pagamento misto.
@@ -410,7 +410,7 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-CAT-02 | CRUD de produtos com nome, SKU, categoria, unidade, preço, custo, IVA, stock e limite de stock baixo. | M |
 | RF-CAT-03 | Um produto pode ter vários códigos de barras, com um principal. | M |
 | RF-CAT-04 | SKU é gerado automaticamente se ficar vazio. | S |
-| RF-CAT-05 | Pesquisa por nome, SKU ou código de barras, insensível a maiúsculas e acentos. | M |
+| RF-CAT-05 | Pesquisa por nome, cor, categoria, SKU ou código de barras, insensível a maiúsculas e acentos. Termos separados por espaços combinam-se com AND, cada um podendo corresponder a um atributo diferente (ex.: `rose red` encontra nome "Rose" e cor "Red"). | M |
 | RF-CAT-06 | Unidades: unidade, kg, g, l, ml, caixa, pacote; quantidades decimais para unidades fracionáveis. | M |
 | RF-CAT-07 | Preços de unidade, meia embalagem e pacote são configurados separadamente; o IVA pode ser acrescentado na venda. | M |
 | RF-CAT-08 | Produtos podem ser desativados ou eliminados logicamente, preservando vendas históricas. | M |

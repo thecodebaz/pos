@@ -7,7 +7,7 @@ import { useApp, errorMessage } from "@/lib/app-context";
 import type { Category, PagedResult, Product, Unit } from "@/lib/db/protocol";
 import { UNIT_LABELS } from "@/lib/db/protocol";
 import { formatMzn, formatQty, parseMzn, parseQty, qtyToInput } from "@/lib/format";
-import { Badge, EmptyState, Field, LoadingPanel, MoneyInput, Note, PageHeader, Select } from "@/components/shared";
+import { Badge, EmptyState, Field, MoneyInput, Note, PageHeader, Select } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PaginationControls } from "@/components/pagination-controls";
@@ -185,8 +185,6 @@ export function ProductsScreen() {
     }
   }
 
-  if (loading) return <LoadingPanel label="A carregar catálogo…" />;
-
   return (
     <div>
       <PageHeader
@@ -196,7 +194,7 @@ export function ProductsScreen() {
           <>
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Pesquisar…" className="pl-8" />
+              <Input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Nome, cor, código… (ex.: rose red)" className="pl-8" />
             </div>
             <Button variant="outline" onClick={() => setCategoriesOpen(true)}>
               Categorias
@@ -209,6 +207,10 @@ export function ProductsScreen() {
           </>
         }
       />
+
+      <p className="mb-2 text-xs text-muted-foreground" aria-live="polite">
+        {loading ? "A actualizar…" : `${total} produto(s)`}
+      </p>
 
       {products.length === 0 ? (
         <EmptyState
