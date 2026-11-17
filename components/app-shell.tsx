@@ -70,7 +70,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-dvh flex-1 flex-col lg:flex-row">
-      <aside className="no-print hidden w-60 shrink-0 flex-col border-r bg-sidebar px-3 py-4 lg:flex">
+      <aside className="no-print hidden w-60 shrink-0 flex-col border-r bg-sidebar px-3 py-4 lg:sticky lg:top-0 lg:flex lg:h-dvh lg:self-start lg:overflow-y-auto">
         <BrandBlock storeName={session.settings.storeName} />
         <nav className="mt-4 flex flex-1 flex-col gap-0.5">
           {items.map((item) => (

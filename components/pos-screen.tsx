@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Banknote, CreditCard, Minus, PackageSearch, Plus, Search, ShoppingCart, Smartphone, Trash2, X } from "lucide-react";
+import { Banknote, CreditCard, Minus, PackageSearch, Plus, Search, ShoppingCart, Smartphone, Trash2, UserPlus, X } from "lucide-react";
 import { cn } from "cn";
 import { useApp, errorMessage } from "@/lib/app-context";
 import type { CartItemInput, Customer, PagedResult, PaymentMethod, Product, Quote, Sale, SaleUnit } from "@/lib/db/protocol";
@@ -73,8 +73,15 @@ export function PosScreen() {
   const [quoteError, setQuoteError] = useState<string | null>(null);
 
   const [payOpen, setPayOpen] = useState(false);
+  const [isCredit, setIsCredit] = useState(false);
   const [method, setMethod] = useState<PaymentMethod>("cash");
   const [tenderedInput, setTenderedInput] = useState("");
+  const [paidNowInput, setPaidNowInput] = useState("");
+  const [newCustomerOpen, setNewCustomerOpen] = useState(false);
+  const [newCustomerName, setNewCustomerName] = useState("");
+  const [newCustomerPhone, setNewCustomerPhone] = useState("");
+  const [newCustomerError, setNewCustomerError] = useState<string | null>(null);
+  const [savingCustomer, setSavingCustomer] = useState(false);
   const [busy, setBusy] = useState(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [approvalToken, setApprovalToken] = useState<string | null>(null);
@@ -130,6 +137,14 @@ export function PosScreen() {
   const productPageCount = Math.max(1, Math.ceil(totalProducts / PRODUCT_PAGE_SIZE));
   const currentProductPage = Math.min(productPage, productPageCount);
   const visibleProducts = products;
+
+  const cartQuantityByProductId = useMemo(() => {
+    const quantities = new Map<string, number>();
+    for (const line of cart) {
+      quantities.set(line.product.id, (quantities.get(line.product.id) ?? 0) + line.qtyMilli);
+    }
+    return quantities;
+  }, [cart]);
 
   const items = useMemo<CartItemInput[]>(
     () => cart.map((line) => ({
@@ -263,6 +278,39 @@ export function PosScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cart.length, payOpen, quote, approvalToken]);
 
+  function resetNewCustomer() {
+    setNewCustomerOpen(false);
+    setNewCustomerName("");
+    setNewCustomerPhone("");
+    setNewCustomerError(null);
+    setSavingCustomer(false);
+  }
+
+  async function saveNewCustomer() {
+    const name = newCustomerName.trim();
+    if (!name) {
+      setNewCustomerError("Indique o nome do cliente.");
+      return;
+    }
+    setSavingCustomer(true);
+    setNewCustomerError(null);
+    try {
+      const created = await call<{ id: string }>("customer.upsert", {
+        name,
+        phone: newCustomerPhone.trim(),
+      });
+      setCustomers(await call<Customer[]>("customer.list", {}));
+      setCustomerId(created.id);
+      resetNewCustomer();
+      setPaymentError(null);
+      toast(`Cliente ${name} adicionado.`, "success");
+    } catch (error) {
+      setNewCustomerError(errorMessage(error));
+    } finally {
+      setSavingCustomer(false);
+    }
+  }
+
   async function startPayment() {
     if (cart.length === 0) return;
     if (quoting) return;
@@ -283,6 +331,9 @@ export function PosScreen() {
     }
     setMethod("cash");
     setTenderedInput(formatMznPlain(totalCents));
+    setIsCredit(false);
+    setPaidNowInput("");
+    resetNewCustomer();
     setPaymentError(null);
     setPayOpen(true);
   }
@@ -304,6 +355,9 @@ export function PosScreen() {
       setApprovalOpen(false);
       setMethod("cash");
       setTenderedInput(formatMznPlain(quote.totalCents));
+      setIsCredit(false);
+      setPaidNowInput("");
+      resetNewCustomer();
       setPaymentError(null);
       setPayOpen(true);
     } catch (error) {
@@ -315,6 +369,15 @@ export function PosScreen() {
 
   async function completeSale() {
     if (!quote) return;
+    const paidNowCents = isCredit ? Math.max(0, parseMzn(paidNowInput)) : quote.totalCents;
+    if (isCredit && !customerId) {
+      setPaymentError("Selecione o cliente da venda a prazo.");
+      return;
+    }
+    if (isCredit && paidNowCents > quote.totalCents) {
+      setPaymentError("O valor pago agora não pode ultrapassar o total da venda.");
+      return;
+    }
     setBusy(true);
     setPaymentError(null);
     try {
@@ -325,13 +388,14 @@ export function PosScreen() {
         applyTax,
         customerId: customerId || null,
         note,
-        payments: [
-          {
-            method,
-            amountCents: quote.totalCents,
-            tenderedCents: method === "cash" ? tendered : quote.totalCents,
-          },
-        ],
+        isCredit,
+        payments: !isCredit || paidNowCents > 0
+          ? [{
+              method,
+              amountCents: isCredit ? paidNowCents : quote.totalCents,
+              tenderedCents: isCredit ? paidNowCents : tendered,
+            }]
+          : [],
         approvalToken,
       });
       setPayOpen(false);
@@ -342,9 +406,17 @@ export function PosScreen() {
       setApplyTax(false);
       setNote("");
       setCustomerId("");
+      setIsCredit(false);
+      setPaidNowInput("");
+      resetNewCustomer();
       setQuote(null);
       setApprovalToken(null);
-      toast(`Venda ${finished.receiptNumber} concluída.`, "success");
+      toast(
+        finished.outstandingCents > 0
+          ? `Venda ${finished.receiptNumber} a prazo registada. Falta ${formatMzn(finished.outstandingCents)}.`
+          : `Venda ${finished.receiptNumber} concluída.`,
+        "success",
+      );
       void loadCatalog();
     } catch (error) {
       setPaymentError(errorMessage(error));
@@ -355,7 +427,9 @@ export function PosScreen() {
 
   if (loading) return <LoadingPanel label="A carregar produtos…" />;
 
-  const changeCents = method === "cash" ? Math.max(0, parseMzn(tenderedInput) - totalCents) : 0;
+  const changeCents = !isCredit && method === "cash" ? Math.max(0, parseMzn(tenderedInput) - totalCents) : 0;
+  const paidNowCents = isCredit ? Math.max(0, parseMzn(paidNowInput)) : totalCents;
+  const creditRemainingCents = Math.max(0, totalCents - paidNowCents);
 
   return (
     <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
@@ -393,14 +467,22 @@ export function PosScreen() {
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 2xl:grid-cols-4">
               {visibleProducts.map((product) => {
                 const low = product.trackStock && product.lowStockThresholdMilli > 0 && product.stockOnHandMilli <= product.lowStockThresholdMilli;
+                const cartQtyMilli = cartQuantityByProductId.get(product.id) ?? 0;
+                const inCart = cartQtyMilli > 0;
                 return (
                   <button
                     key={product.id}
                     type="button"
                     onClick={() => addProduct(product)}
-                    className="flex flex-col items-start gap-1 rounded-xl bg-card p-3 text-left ring-1 ring-foreground/10 transition-all hover:ring-emerald-500 active:translate-y-px"
+                    className={cn(
+                      "flex flex-col items-start gap-1 rounded-xl bg-card p-3 text-left ring-1 ring-foreground/10 transition-all hover:ring-emerald-500 active:translate-y-px",
+                      inCart && "bg-emerald-50 ring-2 ring-emerald-500 dark:bg-emerald-950/30",
+                    )}
                   >
-                    <span className="line-clamp-2 min-h-10 text-sm font-medium">{product.name}</span>
+                    <span className="flex w-full items-start justify-between gap-1">
+                      <span className="line-clamp-2 min-h-10 text-sm font-medium">{product.name}</span>
+                      {inCart ? <Badge tone="success">×{formatQty(cartQtyMilli)}</Badge> : null}
+                    </span>
                     {product.color ? <span className="text-xs text-muted-foreground">Cor: {product.color}</span> : null}
                     <span className="text-base font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">
                       {formatMzn(salePrice(product, defaultSaleUnit(product)))}
@@ -603,32 +685,142 @@ export function PosScreen() {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Cobrar venda</DialogTitle>
-            <DialogDescription>Total a pagar: {formatMzn(totalCents)}</DialogDescription>
+            <DialogDescription>{isCredit ? `Total da venda: ${formatMzn(totalCents)}` : `Total a pagar: ${formatMzn(totalCents)}`}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
-            <Field label="Método de pagamento">
-              <div className="grid grid-cols-2 gap-2">
-                {(Object.keys(PAYMENT_LABELS) as PaymentMethod[]).map((key) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => {
-                      setMethod(key);
-                      setPaymentError(null);
-                      if (key !== "cash") setTenderedInput(formatMznPlain(totalCents));
-                    }}
-                    className={cn(
-                      "flex items-center gap-2 rounded-lg border px-3 py-2 text-sm",
-                      method === key ? "border-emerald-600 bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200" : "hover:bg-muted",
-                    )}
-                  >
-                    {key === "cash" ? <Banknote className="size-4" /> : key === "mpesa" || key === "emola" ? <Smartphone className="size-4" /> : <CreditCard className="size-4" />}
-                    {PAYMENT_LABELS[key]}
-                  </button>
-                ))}
+            <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
+              <div>
+                <p className="text-sm font-medium">Venda a prazo</p>
+                <p className="text-xs text-muted-foreground">Registe a venda e receba o restante depois.</p>
               </div>
-            </Field>
-            {method === "cash" ? (
+              <Switch
+                checked={isCredit}
+                onCheckedChange={(checked) => {
+                  setIsCredit(checked);
+                  setPaidNowInput("");
+                  setPaymentError(null);
+                }}
+                aria-label="Venda a prazo"
+              />
+            </div>
+
+            {isCredit ? (
+              <>
+                <Field
+                  label="Cliente da venda"
+                  htmlFor="creditCustomer"
+                  hint="Selecione um cliente existente ou adicione um novo aqui."
+                >
+                  <div className="flex items-center gap-2">
+                    <Select
+                      id="creditCustomer"
+                      value={customerId}
+                      onChange={(event) => { setCustomerId(event.target.value); setPaymentError(null); }}
+                      className="min-w-0 flex-1"
+                    >
+                      <option value="">Selecione o cliente…</option>
+                      {customers.map((customer) => (
+                        <option key={customer.id} value={customer.id}>
+                          {customer.name}
+                          {customer.creditBalanceCents > 0 ? ` · dívida ${formatMzn(customer.creditBalanceCents)}` : ""}
+                        </option>
+                      ))}
+                    </Select>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon-sm"
+                      aria-label="Adicionar novo cliente"
+                      title="Adicionar novo cliente"
+                      onClick={() => {
+                        setNewCustomerOpen((current) => !current);
+                        setNewCustomerError(null);
+                      }}
+                    >
+                      <UserPlus className="size-4" />
+                    </Button>
+                  </div>
+                </Field>
+                {newCustomerOpen ? (
+                  <div className="space-y-2 rounded-lg border border-emerald-600/30 bg-emerald-50/50 p-3 dark:bg-emerald-950/20">
+                    <p className="text-xs font-semibold">Novo cliente</p>
+                    <Field label="Nome *" htmlFor="newCustomerName">
+                      <Input
+                        id="newCustomerName"
+                        value={newCustomerName}
+                        onChange={(event) => setNewCustomerName(event.target.value)}
+                        placeholder="Nome do cliente"
+                        autoFocus
+                      />
+                    </Field>
+                    <Field label="Contacto" htmlFor="newCustomerPhone" hint="Telefone ou outro contacto (opcional).">
+                      <Input
+                        id="newCustomerPhone"
+                        inputMode="tel"
+                        value={newCustomerPhone}
+                        onChange={(event) => setNewCustomerPhone(event.target.value)}
+                        placeholder="+258 84 000 0000"
+                      />
+                    </Field>
+                    {newCustomerError ? <Note tone="danger">{newCustomerError}</Note> : null}
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => setNewCustomerOpen(false)}
+                        disabled={savingCustomer}
+                      >
+                        Cancelar
+                      </Button>
+                      <Button
+                        type="button"
+                        size="xs"
+                        className="bg-emerald-600 text-white hover:bg-emerald-700"
+                        onClick={() => void saveNewCustomer()}
+                        disabled={savingCustomer || !newCustomerName.trim()}
+                      >
+                        {savingCustomer ? "A guardar…" : "Guardar e seleccionar"}
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+                <Field label="Valor pago agora" htmlFor="paidNow" hint={`Falta pagar ${formatMzn(creditRemainingCents)}`}>
+                  <MoneyInput id="paidNow" value={paidNowInput} onValueChange={setPaidNowInput} placeholder="0,00" autoFocus />
+                </Field>
+                <Note>
+                  {paidNowCents === 0
+                    ? "Nenhum valor será recebido agora. A dívida fica registada para este cliente."
+                    : `Recebido agora ${formatMzn(paidNowCents)}. O resto fica em dívida.`}
+                </Note>
+              </>
+            ) : null}
+
+            {!isCredit || paidNowCents > 0 ? (
+              <Field label={isCredit ? "Método do valor inicial" : "Método de pagamento"}>
+                <div className="grid grid-cols-2 gap-2">
+                  {(Object.keys(PAYMENT_LABELS) as PaymentMethod[]).map((key) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => {
+                        setMethod(key);
+                        setPaymentError(null);
+                        if (key !== "cash") setTenderedInput(formatMznPlain(totalCents));
+                      }}
+                      className={cn(
+                        "flex items-center gap-2 rounded-lg border px-3 py-2 text-sm",
+                        method === key ? "border-emerald-600 bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200" : "hover:bg-muted",
+                      )}
+                    >
+                      {key === "cash" ? <Banknote className="size-4" /> : key === "mpesa" || key === "emola" ? <Smartphone className="size-4" /> : <CreditCard className="size-4" />}
+                      {PAYMENT_LABELS[key]}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+            ) : null}
+            {!isCredit && method === "cash" ? (
               <>
                 <Field label="Valor entregue" htmlFor="tendered">
                   <MoneyInput id="tendered" value={tenderedInput} onValueChange={setTenderedInput} autoFocus />
@@ -645,17 +837,25 @@ export function PosScreen() {
                   ))}
                 </div>
               </>
-            ) : (
+            ) : null}
+            {!isCredit && method !== "cash" ? (
               <Note>Confirme o recebimento no meio de pagamento seleccionado antes de concluir.</Note>
-            )}
+            ) : null}
+            {isCredit && paidNowCents > 0 ? <Note>O valor pago agora é exato, sem troco.</Note> : null}
             {paymentError ? <Note tone="danger">{paymentError}</Note> : null}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setPayOpen(false)} disabled={busy}>
               Cancelar
             </Button>
-            <Button className="bg-emerald-600 text-white hover:bg-emerald-700" onClick={() => void completeSale()} disabled={busy || (method === "cash" && parseMzn(tenderedInput) < totalCents)}>
-              {busy ? "A guardar…" : "Concluir venda"}
+            <Button
+              className="bg-emerald-600 text-white hover:bg-emerald-700"
+              onClick={() => void completeSale()}
+              disabled={busy || (isCredit
+                ? !customerId || paidNowCents > totalCents
+                : method === "cash" && parseMzn(tenderedInput) < totalCents)}
+            >
+              {busy ? "A guardar…" : isCredit ? "Registar venda a prazo" : "Concluir venda"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -724,5 +924,6 @@ const defaultSettings = {
   installationCode: "T01",
   allowNegativeStock: true,
   maxCashierDiscountBp: 500,
+  discountApprovalMode: "above_limit" as const,
   idleLockSeconds: 300,
 };

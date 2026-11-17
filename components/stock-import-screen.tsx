@@ -1,12 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Check, FileSpreadsheet } from "lucide-react";
 import { useApp, errorMessage } from "@/lib/app-context";
 import type { StockImportDraft } from "@/lib/stock-import";
 import { STOCK_IMPORT_DRAFT_KEY } from "@/lib/stock-import";
-import type { StockImportCommitItem, StockImportItem, StockImportMatch } from "@/lib/db/protocol";
+import type {
+  StockImportCommitItem,
+  StockImportCommitResult,
+  StockImportDocumentCheck,
+  StockImportItem,
+  StockImportMatch,
+} from "@/lib/db/protocol";
 import { formatMzn, formatMznPlain, formatQty, parseMzn, parseQty, qtyToInput } from "@/lib/format";
 import { EmptyState, Field, LoadingPanel, MoneyInput, Note, PageHeader } from "@/components/shared";
 import { Button } from "@/components/ui/button";
@@ -35,8 +41,6 @@ function parseRate(value: string): number {
 }
 
 function rowProblem(row: ReviewRow): string | null {
-  if (row.match.productId && !row.match.active) return "Produto inactivo";
-  if (row.match.productId && !row.match.trackStock) return "Produto sem controlo de stock";
   if (row.match.productId && row.match.unit !== "un") return "A unidade existente não é unidade";
   if (!row.sellByUnit && !row.sellByPackage && !row.sellByHalfPackage) return "Seleccione pelo menos um formato de venda";
   if (row.sellByUnit && (!row.match.productId || !row.match.priceCents || row.match.priceCents <= 0) && parseMzn(row.salePrice) <= 0) {
@@ -64,6 +68,8 @@ export function StockImportScreen() {
   const { call, toast } = useApp();
   const router = useRouter();
   const [documentRef, setDocumentRef] = useState("");
+  const [documentCheck, setDocumentCheck] = useState<StockImportDocumentCheck | null>(null);
+  const [checkingDocument, setCheckingDocument] = useState(false);
   const [rows, setRows] = useState<ReviewRow[]>([]);
   const [rate, setRate] = useState("");
   const [loading, setLoading] = useState(true);
@@ -123,6 +129,39 @@ export function StockImportScreen() {
     };
   }, [call]);
 
+  // Bloqueia facturas repetidas antes de o utilizador preencher o resto do
+  // formulário. A confirmação no worker volta a validar dentro da transação.
+  useEffect(() => {
+    const ref = documentRef.trim();
+    if (!ref || rows.length === 0) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setCheckingDocument(true);
+        try {
+          const result = await call<StockImportDocumentCheck>("stock.import.check", { documentRef: ref });
+          if (!cancelled) setDocumentCheck(result);
+        } catch (err) {
+          if (!cancelled) setError(errorMessage(err));
+        } finally {
+          if (!cancelled) setCheckingDocument(false);
+        }
+      })();
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [call, documentRef, rows.length]);
+
+  const reference = documentRef.trim();
+  const documentAvailable = reference.length > 0
+    && !checkingDocument
+    && documentCheck?.documentRef === reference
+    && documentCheck.exists === false;
+  const documentDuplicate = reference.length > 0
+    && documentCheck?.documentRef === reference
+    && documentCheck.exists === true;
   const exchangeRate = parseRate(rate);
   const rowErrors = rows.map(rowProblem);
   const totalQuantity = rows.reduce((total, row) => total + row.item.qtyMilli, 0);
@@ -132,6 +171,7 @@ export function StockImportScreen() {
   );
   const mismatchCount = rows.filter((row) => Math.abs(row.item.purchaseCostMinor - row.item.valueMinor) > 2).length;
   const canConfirm = rows.length > 0
+    && documentAvailable
     && exchangeRate > 0
     && rowErrors.every((problem) => problem === null)
     && (mismatchCount === 0 || confirmedMismatches);
@@ -185,13 +225,13 @@ export function StockImportScreen() {
         packagePriceCents: row.sellByPackage ? parseMzn(row.packagePrice) : 0,
         halfPackagePriceCents: row.sellByHalfPackage ? parseMzn(row.halfPackagePrice) : 0,
       }));
-      const result = await call<{ productCount: number; createdCount: number; quantityMilli: number; totalCostCents: number }>(
+      const result = await call<StockImportCommitResult>(
         "stock.import.commit",
-        { documentRef, exchangeRate, items },
+        { documentRef: reference, exchangeRate, items },
       );
       sessionStorage.removeItem(STOCK_IMPORT_DRAFT_KEY);
       toast(
-        `Importação concluída: ${result.productCount} produtos, ${formatQty(result.quantityMilli)} unidades em stock.`,
+        `Factura ${result.documentRef}: +${formatQty(result.quantityMilli)} unidades em stock (${result.productCount} produtos).`,
         "success",
       );
       router.push("/stock/");
@@ -206,6 +246,23 @@ export function StockImportScreen() {
     newProducts: rows.filter((row) => row.match.productId === null).length,
     existingProducts: rows.filter((row) => row.match.productId !== null).length,
   }), [rows]);
+
+  let documentHint: ReactNode = "Obrigatório. Vem da célula B2 quando o Excel a preenche, mas pode ser corrigida.";
+  if (reference && checkingDocument) {
+    documentHint = "A verificar se esta factura já foi importada…";
+  } else if (documentDuplicate) {
+    documentHint = (
+      <span className="font-medium text-destructive">
+        Factura já importada a {documentCheck?.createdAt?.slice(0, 10)}. Nenhum registo será gravado; escolha outro número.
+      </span>
+    );
+  } else if (documentAvailable) {
+    documentHint = (
+      <span className="font-medium text-emerald-700">
+        Factura disponível. A confirmação aumenta o stock em {formatQty(totalQuantity)} unidades.
+      </span>
+    );
+  }
 
   if (loading) return <LoadingPanel label="A validar produtos e variantes…" />;
 
@@ -226,7 +283,7 @@ export function StockImportScreen() {
     <div>
       <PageHeader
         title="Rever importação de stock"
-        description="Confirme a taxa Rand → MZN, escolha os formatos de venda e preencha apenas os preços dos formatos activos. Nenhum dado será gravado antes da confirmação."
+        description="Confirme o número da factura e a taxa Rand → MZN, escolha os formatos de venda e preencha apenas os preços dos formatos activos. Facturas repetidas não são gravadas."
         actions={<Button variant="outline" onClick={() => router.push("/stock/")} disabled={busy}><ArrowLeft className="size-4" /> Cancelar</Button>}
       />
 
@@ -240,16 +297,31 @@ export function StockImportScreen() {
           <p className="text-lg font-semibold tabular-nums">{summary.existingProducts}</p>
         </div>
         <div className="rounded-xl bg-card p-3 ring-1 ring-foreground/10">
-          <p className="text-xs text-muted-foreground">Quantidade total</p>
-          <p className="text-lg font-semibold tabular-nums">{formatQty(totalQuantity)} un</p>
+          <p className="text-xs text-muted-foreground">Aumento de stock</p>
+          <p className="text-lg font-semibold tabular-nums text-emerald-700">+{formatQty(totalQuantity)} un</p>
         </div>
       </div>
 
       <Note>
-        As linhas repetidas com o mesmo SKU, nome e cor foram agrupadas. A quantidade do Excel continua a entrar em unidades. Escolha se o produto será vendido por unidade, pacote ou meia embalagem; só os preços dos formatos escolhidos são obrigatórios. O preço da metade é sugerido como metade do pacote quando aplicável.
+        As linhas repetidas com o mesmo SKU, nome e cor foram agrupadas. A quantidade do Excel continua a entrar em unidades. Produtos existentes inactivos ou sem controlo de stock são reactivados automaticamente ao confirmar; só os produtos com unidade diferente de unidade-base impedem a importação. Escolha se o produto será vendido por unidade, pacote ou meia embalagem; só os preços dos formatos escolhidos são obrigatórios. O preço da metade é sugerido como metade do pacote quando aplicável.
       </Note>
 
       <div className="my-4 grid gap-3 sm:grid-cols-2">
+        <Field label="Número da factura *" htmlFor="stockImportDocumentRef" hint={documentHint}>
+          <Input
+            id="stockImportDocumentRef"
+            required
+            value={documentRef}
+            onChange={(event) => {
+              setDocumentRef(event.target.value);
+              setDocumentCheck(null);
+              setCheckingDocument(false);
+            }}
+            placeholder="Ex.: FT 2026/123"
+            disabled={busy}
+            className={documentDuplicate ? "border-destructive" : documentAvailable ? "border-emerald-600" : undefined}
+          />
+        </Field>
         <Field label="Taxa de conversão (1 R = quantos MZN?)" htmlFor="stockImportRate" hint="Ex.: 4,10. A taxa é aplicada ao custo de compra, não aos preços de venda.">
           <Input
             id="stockImportRate"
@@ -260,7 +332,7 @@ export function StockImportScreen() {
             placeholder="Introduza a taxa"
           />
         </Field>
-        <div className="flex items-end rounded-xl bg-muted/50 p-3">
+        <div className="flex items-end rounded-xl bg-muted/50 p-3 sm:col-span-2">
           <div>
             <p className="text-xs text-muted-foreground">Custo de compra convertido</p>
             <p className="text-lg font-semibold tabular-nums">{exchangeRate ? formatMzn(totalMznCents) : "—"}</p>
@@ -293,6 +365,12 @@ export function StockImportScreen() {
               const unitCostMznCents = Math.round((purchaseTotalMznCents * 1000) / row.item.qtyMilli);
               const needsSalePrice = row.sellByUnit && (!row.match.productId || !row.match.priceCents);
               const problem = rowErrors[index];
+              const reactivationNotes = row.match.productId
+                ? [
+                    !row.match.active ? "será activado" : "",
+                    !row.match.trackStock ? "passará a controlar stock" : "",
+                  ].filter(Boolean)
+                : [];
               return (
                 <TableRow key={`${row.item.sku}-${row.item.name}-${row.item.color}`}>
                   <TableCell className="font-mono text-xs">{row.item.sku}</TableCell>
@@ -359,6 +437,7 @@ export function StockImportScreen() {
                     <span className={row.match.productId ? "text-xs text-emerald-700" : "text-xs text-blue-700"}>
                       {row.match.productId ? "Existente" : "Novo produto"}
                     </span>
+                    {reactivationNotes.length > 0 ? <p className="text-xs text-amber-700">{reactivationNotes.join(" · ")}</p> : null}
                     {problem ? <p className="text-xs text-destructive">{problem}</p> : null}
                   </TableCell>
                   <TableCell className="min-w-40">
@@ -399,7 +478,7 @@ export function StockImportScreen() {
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-muted-foreground">
           <FileSpreadsheet className="mr-1 inline size-3.5" />
-          Factura {documentRef || "sem referência"} · as entradas serão registadas como movimentos de compra.
+          Factura {reference || "por indicar"} · a confirmação aumenta o stock em +{formatQty(totalQuantity)} unidades, registadas como movimentos de compra.
         </p>
         <Button onClick={() => void confirmImport()} disabled={!canConfirm || busy}>
           <Check className="size-4" /> {busy ? "A importar…" : "Confirmar e actualizar stock"}

@@ -22,6 +22,7 @@ export function SettingsScreen() {
     installationCode: settings?.installationCode ?? "T01",
     allowNegativeStock: settings?.allowNegativeStock ?? true,
     maxCashierDiscount: String(((settings?.maxCashierDiscountBp ?? 500) / 100).toFixed(1)).replace(".", ","),
+    discountApprovalMode: settings?.discountApprovalMode ?? "above_limit",
     idleMinutes: String(Math.round((settings?.idleLockSeconds ?? 300) / 60)),
   }));
   const [saving, setSaving] = useState(false);
@@ -60,6 +61,7 @@ export function SettingsScreen() {
         installationCode: form.installationCode,
         allowNegativeStock: form.allowNegativeStock,
         maxCashierDiscountBp: Math.round((Number.isFinite(percent) ? percent : 5) * 100),
+        discountApprovalMode: form.discountApprovalMode,
         idleLockSeconds: Math.max(1, Number(form.idleMinutes) || 5) * 60,
       });
       updateSettings(updated);
@@ -167,7 +169,26 @@ export function SettingsScreen() {
                 ))}
               </Select>
             </Field>
-            <Field label="Desconto máximo do caixa" htmlFor="settingsDiscount" hint="Percentagem sobre o subtotal. Acima deste valor exige aprovação.">
+            <Field
+              label="Aprovação de descontos"
+              htmlFor="settingsDiscountApproval"
+              hint="Quando exigida, outro utilizador gerente ou proprietário tem de autorizar com o PIN."
+            >
+              <Select
+                id="settingsDiscountApproval"
+                value={form.discountApprovalMode}
+                onChange={(event) => setForm({ ...form, discountApprovalMode: event.target.value as typeof form.discountApprovalMode })}
+              >
+                <option value="never">Nunca — sem aprovação</option>
+                <option value="above_limit">Acima do limite do caixa</option>
+                <option value="always">Sempre — qualquer desconto</option>
+              </Select>
+            </Field>
+            <Field
+              label="Desconto máximo do caixa"
+              htmlFor="settingsDiscount"
+              hint="Percentagem sobre o subtotal. Usado apenas no modo “Acima do limite do caixa”."
+            >
               <div className="relative">
                 <Input
                   id="settingsDiscount"

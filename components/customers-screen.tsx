@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Pencil, Plus, Search, Trash2, UserRound, Phone } from "lucide-react";
 import { useApp, errorMessage } from "@/lib/app-context";
 import type { Customer, PagedResult } from "@/lib/db/protocol";
+import { formatMzn } from "@/lib/format";
 import { EmptyState, Field, LoadingPanel, Note, PageHeader } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -132,6 +133,12 @@ export function CustomersScreen() {
                       </p>
                     ) : null}
                     {customer.nif ? <p className="text-xs text-muted-foreground">NUIT: {customer.nif}</p> : null}
+                    {customer.creditBalanceCents > 0 ? (
+                      <p className="mt-1 text-xs font-medium text-amber-600">
+                        Dívida em aberto: {formatMzn(customer.creditBalanceCents)}
+                        {customer.creditSaleCount > 0 ? ` · ${customer.creditSaleCount} venda(s)` : ""}
+                      </p>
+                    ) : null}
                     {customer.address ? <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{customer.address}</p> : null}
                   </div>
                   <div className="flex gap-0.5">

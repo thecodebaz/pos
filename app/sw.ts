@@ -40,6 +40,18 @@ const navigationCaching = {
   }),
 };
 
+// O worker SQLite muda em cada build e não faz parte do manifesto precached.
+// NetworkFirst evita que uma cópia antiga em cache continue a correr após uma
+// actualização; em offline usa a última versão guardada.
+const sqliteWorkerCaching = {
+  matcher: ({ request, sameOrigin }: { request: Request; sameOrigin: boolean }) =>
+    sameOrigin && new URL(request.url).pathname === "/workers/sqlite.worker.js",
+  handler: new NetworkFirst({
+    cacheName: "sqlite-worker",
+    plugins: [rejectHttpErrors, new ExpirationPlugin({ maxEntries: 4 })],
+  }),
+};
+
 const serwist = new Serwist({
   precacheEntries: self.__SW_MANIFEST,
   skipWaiting: false,
@@ -47,7 +59,7 @@ const serwist = new Serwist({
   // Com navigation preload a resposta de rede é devolvida diretamente e ignora
   // os plugins da estratégia, pelo que uma resposta 5xx impediria o fallback.
   navigationPreload: false,
-  runtimeCaching: [navigationCaching, ...defaultCache],
+  runtimeCaching: [navigationCaching, sqliteWorkerCaching, ...defaultCache],
   fallbacks: {
     entries: [
       {

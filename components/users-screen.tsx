@@ -18,7 +18,7 @@ export function UsersScreen() {
   const [loading, setLoading] = useState(true);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<UserPublic | null>(null);
-  const [form, setForm] = useState({ username: "", displayName: "", role: "cashier" as Role, pin: "" });
+  const [form, setForm] = useState({ username: "", displayName: "", role: "cashier" as Role, pin: "", loginShortcut: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resetUser, setResetUser] = useState<UserPublic | null>(null);
@@ -42,14 +42,20 @@ export function UsersScreen() {
 
   function openNew() {
     setEditing(null);
-    setForm({ username: "", displayName: "", role: "cashier", pin: "" });
+    setForm({ username: "", displayName: "", role: "cashier", pin: "", loginShortcut: "" });
     setError(null);
     setFormOpen(true);
   }
 
   function openEdit(user: UserPublic) {
     setEditing(user);
-    setForm({ username: user.username, displayName: user.displayName, role: user.role, pin: "" });
+    setForm({
+      username: user.username,
+      displayName: user.displayName,
+      role: user.role,
+      pin: "",
+      loginShortcut: user.loginShortcut === null ? "" : String(user.loginShortcut),
+    });
     setError(null);
     setFormOpen(true);
   }
@@ -59,11 +65,24 @@ export function UsersScreen() {
     setBusy(true);
     setError(null);
     try {
+      const loginShortcut = form.loginShortcut ? Number(form.loginShortcut) : null;
       if (editing) {
-        await call("user.update", { id: editing.id, displayName: form.displayName, role: form.role });
+        await call("user.update", {
+          id: editing.id,
+          displayName: form.displayName,
+          role: form.role,
+          loginShortcut,
+        });
         toast("Utilizador actualizado.", "success");
       } else {
-        await call("user.create", form);
+        await call("user.create", {
+          username: form.username,
+          displayName: form.displayName,
+          role: form.role,
+          pin: form.pin,
+          // Vazio = atribuir automaticamente a primeira tecla livre.
+          ...(form.loginShortcut ? { loginShortcut } : {}),
+        });
         toast("Utilizador criado. Terá de alterar o PIN no primeiro acesso.", "success");
       }
       setFormOpen(false);
@@ -124,6 +143,7 @@ export function UsersScreen() {
             <TableHeader>
               <TableRow>
                 <TableHead>Utilizador</TableHead>
+                <TableHead>Atalho</TableHead>
                 <TableHead>Perfil</TableHead>
                 <TableHead>Estado</TableHead>
                 <TableHead>Último acesso</TableHead>
@@ -143,6 +163,15 @@ export function UsersScreen() {
                         <p className="text-xs text-muted-foreground">@{user.username}</p>
                       </div>
                     </div>
+                  </TableCell>
+                  <TableCell>
+                    {user.loginShortcut !== null ? (
+                      <span title="Tecla para seleccionar no login">
+                        <Badge tone="info">{user.loginShortcut}</Badge>
+                      </span>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">—</span>
+                    )}
                   </TableCell>
                   <TableCell>
                     <Badge tone={user.role === "owner" ? "info" : user.role === "manager" ? "success" : "neutral"}>{roleLabel(user.role)}</Badge>
@@ -201,6 +230,22 @@ export function UsersScreen() {
                 <option value="cashier">Caixa — vende e consulta</option>
                 <option value="manager">Gerente — aprova, gere stock e relatórios</option>
                 <option value="owner">Proprietário — acesso total</option>
+              </Select>
+            </Field>
+            <Field
+              label="Atalho de entrada"
+              htmlFor="userShortcut"
+              hint={editing ? "Número de 1 a 9 para seleccionar este utilizador com o teclado." : "Deixe em branco para atribuir a primeira tecla livre."}
+            >
+              <Select
+                id="userShortcut"
+                value={form.loginShortcut}
+                onChange={(event) => setForm({ ...form, loginShortcut: event.target.value })}
+              >
+                <option value="">{editing ? "Sem atalho" : "Automático (primeira tecla livre)"}</option>
+                {Array.from({ length: 9 }, (_, index) => String(index + 1)).map((key) => (
+                  <option key={key} value={key}>Tecla {key}</option>
+                ))}
               </Select>
             </Field>
             {!editing ? (

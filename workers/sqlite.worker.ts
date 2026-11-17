@@ -31,11 +31,14 @@ import type {
   SaleItem,
   SalePayment,
   SalePageResult,
+  SaleSettlement,
   SaleSummary,
   SaleUnit,
   SessionInfo,
   Settings,
   StockImportCommitItem,
+  StockImportCommitResult,
+  StockImportDocumentCheck,
   StockImportMatch,
   StockMovement,
   Supplier,
@@ -44,7 +47,7 @@ import type {
   WorkerRequest,
 } from "../lib/db/protocol";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 8;
 const PIN_ITERATIONS = 600_000;
 const MAX_IMPORT_BYTES = 512 * 1024 * 1024;
 const AUTO_BACKUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -190,6 +193,9 @@ function toSettings(row: Row | null): Settings | null {
     installationCode: String(row.installation_code ?? "T01"),
     allowNegativeStock: toBool(row.allow_negative_stock),
     maxCashierDiscountBp: Number(row.max_cashier_discount_bp ?? 500),
+    discountApprovalMode: (["never", "above_limit", "always"].includes(String(row.discount_approval_mode))
+      ? String(row.discount_approval_mode)
+      : "above_limit") as Settings["discountApprovalMode"],
     idleLockSeconds: Number(row.idle_lock_seconds ?? 300),
   };
 }
@@ -209,7 +215,58 @@ function toUser(row: Row): UserPublic {
     active: toBool(row.active),
     mustChangePin: toBool(row.must_change_pin),
     lastLoginAt: row.last_login_at ? String(row.last_login_at) : null,
+    loginShortcut: row.login_shortcut === null || row.login_shortcut === undefined ? null : Number(row.login_shortcut),
   };
+}
+
+/** Normaliza a tecla de atalho de entrada (1-9), garantindo que é única. */
+function parseLoginShortcut(value: unknown, excludeId?: string): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const shortcut = Math.trunc(Number(value));
+  if (!Number.isFinite(shortcut) || shortcut < 1 || shortcut > 9) {
+    fail("VALIDATION", "O atalho de entrada deve ser um número entre 1 e 9.");
+  }
+  const taken = excludeId
+    ? one("SELECT id FROM users WHERE login_shortcut = ? AND id <> ?", [shortcut, excludeId])
+    : one("SELECT id FROM users WHERE login_shortcut = ?", [shortcut]);
+  if (taken) fail("VALIDATION", `A tecla ${shortcut} já está atribuída a outro utilizador.`);
+  return shortcut;
+}
+
+/** Primeira tecla livre para atribuição automática. */
+function nextFreeLoginShortcut(): number | null {
+  for (let shortcut = 1; shortcut <= 9; shortcut += 1) {
+    if (!one("SELECT id FROM users WHERE login_shortcut = ?", [shortcut])) return shortcut;
+  }
+  return null;
+}
+
+/** Atribui teclas em falta a utilizadores criados antes do atalho existir. */
+function ensureLoginShortcuts(): void {
+  const users = rows(
+    `SELECT id, login_shortcut FROM users
+     ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END, display_name, created_at`,
+  );
+  // Reservar primeiro todas as teclas já usadas; só depois preencher as faltas.
+  const used = new Set<number>();
+  for (const user of users) {
+    const current = user.login_shortcut === null || user.login_shortcut === undefined
+      ? null
+      : Number(user.login_shortcut);
+    if (current !== null && Number.isFinite(current)) used.add(current);
+  }
+  for (const user of users) {
+    const current = user.login_shortcut === null || user.login_shortcut === undefined
+      ? null
+      : Number(user.login_shortcut);
+    if (current !== null && Number.isFinite(current)) continue;
+    for (let shortcut = 1; shortcut <= 9; shortcut += 1) {
+      if (used.has(shortcut)) continue;
+      run("UPDATE users SET login_shortcut = ?, updated_at = ? WHERE id = ?", [shortcut, nowIso(), user.id]);
+      used.add(shortcut);
+      break;
+    }
+  }
 }
 
 function isSetupRequired(): boolean {
@@ -320,6 +377,32 @@ function findStockImportProduct(sku: string, name: string, color: string): Row |
   return matches[0] ?? null;
 }
 
+/** Chave estável da factura: sem acentos, minúsculas e espaços colapsados. */
+function normalizeDocumentRef(value: unknown): string {
+  return norm(value).replace(/\s+/g, " ");
+}
+
+function findStockImportDocument(documentRef: unknown): Row | null {
+  const key = normalizeDocumentRef(documentRef);
+  if (!key) return null;
+  return one("SELECT id, document_ref, created_at FROM stock_imports WHERE document_key = ? LIMIT 1", [key]) ?? null;
+}
+
+function checkStockImportDocument(documentRef: unknown): StockImportDocumentCheck {
+  requireSession(["owner", "manager"]);
+  const ref = String(documentRef ?? "").trim();
+  if (!ref) return { exists: false, documentRef: null, createdAt: null };
+  if (ref.length > 100) fail("VALIDATION", "O número da factura não pode exceder 100 caracteres.");
+  const existing = findStockImportDocument(ref);
+  return existing
+    ? {
+        exists: true,
+        documentRef: String(existing.document_ref),
+        createdAt: String(existing.created_at),
+      }
+    : { exists: false, documentRef: ref, createdAt: null };
+}
+
 function previewStockImport(rawItems: unknown): StockImportMatch[] {
   requireSession(["owner", "manager"]);
   if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 500) {
@@ -361,12 +444,7 @@ function previewStockImport(rawItems: unknown): StockImportMatch[] {
   });
 }
 
-function commitStockImport(payload: Row): {
-  productCount: number;
-  createdCount: number;
-  quantityMilli: number;
-  totalCostCents: number;
-} {
+function commitStockImport(payload: Row): StockImportCommitResult {
   const current = requireSession(["owner", "manager"]);
   const items = payload.items as StockImportCommitItem[];
   const exchangeRate = Number(payload.exchangeRate);
@@ -377,7 +455,17 @@ function commitStockImport(payload: Row): {
     fail("VALIDATION", "Indique uma taxa de conversão Rand → MZN válida.");
   }
 
-  const documentRef = String(payload.documentRef ?? "").trim().slice(0, 100) || null;
+  const documentCheck = checkStockImportDocument(payload.documentRef);
+  if (!documentCheck.documentRef) {
+    fail("VALIDATION", "Indique o número da factura antes de confirmar a importação.");
+  }
+  if (documentCheck.exists) {
+    fail(
+      "DUPLICATE_DOCUMENT",
+      `A factura ${documentCheck.documentRef} já foi importada a ${String(documentCheck.createdAt).slice(0, 10)}. Nenhum movimento foi gravado.`,
+    );
+  }
+  const documentRef = documentCheck.documentRef;
   const seen = new Set<string>();
   const now = nowIso();
   let createdCount = 0;
@@ -385,6 +473,11 @@ function commitStockImport(payload: Row): {
   let totalCostCents = 0;
   db.exec("BEGIN IMMEDIATE");
   try {
+    // Segunda barreira, agora dentro da transação: a factura não pode entrar
+    // duas vezes mesmo que outro processo tenha gravado entretanto.
+    if (findStockImportDocument(documentRef)) {
+      fail("DUPLICATE_DOCUMENT", `A factura ${documentRef} já foi importada. Nenhum movimento foi gravado.`);
+    }
     for (const raw of items) {
       const sku = String(raw.sku ?? "").trim();
       const name = String(raw.name ?? "").trim();
@@ -448,8 +541,14 @@ function commitStockImport(payload: Row): {
         fail("IMPORT_INVALID", `O custo convertido para ${sku} excede o limite permitido.`);
       }
       const product = findStockImportProduct(sku, name, color);
-      if (product && (!toBool(product.active) || !toBool(product.track_stock) || String(product.unit) !== "un")) {
-        fail("IMPORT_CONFLICT", `O produto ${sku} · ${color} existe, mas está inactivo ou não controla stock em unidades.`);
+      // Produto inactivo ou sem controlo de stock é reactivado mais abaixo: o
+      // facto de existir não pode impedir a entrada de uma nova factura.
+      // A unidade, por outro lado, não é convertida sem confirmação explícita.
+      if (product && String(product.unit) !== "un") {
+        fail(
+          "IMPORT_CONFLICT",
+          `O produto ${sku} · ${color} existe com a unidade ${String(product.unit)}. A importação Excel só aceita produtos em unidades; crie uma variante própria ou corrija o produto.`,
+        );
       }
       const unitPriceCents = Number(product?.price_cents ?? 0) > 0 ? Number(product?.price_cents) : salePriceCents ?? 0;
       if (sellByUnit && unitPriceCents <= 0) {
@@ -484,6 +583,7 @@ function commitStockImport(payload: Row): {
           `UPDATE products SET cost_cents = ?, price_cents = CASE WHEN price_cents <= 0 AND ? = 1 THEN ? ELSE price_cents END,
              package_qty_milli = ?, package_price_cents = ?, half_package_price_cents = ?,
              sell_by_unit = ?, sell_by_package = ?, sell_by_half_package = ?,
+             active = 1, track_stock = 1,
              stock_on_hand_milli = ?, updated_at = ? WHERE id = ?`,
           [
             unitCostCents,
@@ -500,6 +600,18 @@ function commitStockImport(payload: Row): {
             productId,
           ],
         );
+        const wasActive = toBool(product.active);
+        const wasTracking = toBool(product.track_stock);
+        if (!wasActive || !wasTracking) {
+          audit(
+            "product.reactivated",
+            "product",
+            productId,
+            { active: wasActive, trackStock: wasTracking },
+            { active: true, trackStock: true, documentRef },
+            current.userId,
+          );
+        }
         const packageConfigChanged = beforeConfig.priceCents !== afterConfig.priceCents
           || beforeConfig.packageQtyMilli !== afterConfig.packageQtyMilli
           || beforeConfig.packagePriceCents !== afterConfig.packagePriceCents
@@ -593,13 +705,50 @@ function commitStockImport(payload: Row): {
         fail("IMPORT_INVALID", "Os totais da importação excedem o limite permitido.");
       }
     }
+    const importId = uuid();
+    run(
+      `INSERT INTO stock_imports (
+         id, document_ref, document_key, product_count, quantity_milli,
+         total_cost_cents, exchange_rate, user_id, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        importId,
+        documentRef,
+        normalizeDocumentRef(documentRef),
+        items.length,
+        totalQuantityMilli,
+        totalCostCents,
+        exchangeRate,
+        current.userId,
+        now,
+      ],
+    );
+    audit(
+      "stock.import.document",
+      "stock_import",
+      importId,
+      null,
+      { documentRef, productCount: items.length, quantityMilli: totalQuantityMilli, totalCostCents, exchangeRate },
+      current.userId,
+    );
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
-    if (String(error).includes("UNIQUE")) fail("DUPLICATE", "Já existe um produto com o mesmo SKU, nome e cor.");
+    if (String(error).includes("UNIQUE")) {
+      if (String(error).includes("stock_imports")) {
+        fail("DUPLICATE_DOCUMENT", `A factura ${documentRef} já foi importada. Nenhum movimento foi gravado.`);
+      }
+      fail("DUPLICATE", "Já existe um produto com o mesmo SKU, nome e cor.");
+    }
     throw error;
   }
-  return { productCount: items.length, createdCount, quantityMilli: totalQuantityMilli, totalCostCents };
+  return {
+    documentRef,
+    productCount: items.length,
+    createdCount,
+    quantityMilli: totalQuantityMilli,
+    totalCostCents,
+  };
 }
 
 function productRows(where = "", bind: unknown[] = []): Row[] {
@@ -781,13 +930,23 @@ function buildQuote(payload: QuoteInput, currentSession: NonNullable<typeof sess
   const total = lines.reduce((a, b) => a + b.totalCents, 0);
   const tax = lines.reduce((a, b) => a + b.taxCents, 0);
 
-  if (currentSession.role === "cashier" && subtotal > 0) {
-    const maxDiscount = roundHalfUp((subtotal * settings.maxCashierDiscountBp) / 10000);
-    if (discount > maxDiscount) approvalReason = approvalReason ?? "Desconto acima do limite do caixa.";
+  if (discount > 0) {
+    if (settings.discountApprovalMode === "always") {
+      approvalReason = approvalReason ?? "Desconto exige aprovação de um gerente ou proprietário.";
+    } else if (
+      settings.discountApprovalMode === "above_limit"
+      && currentSession.role === "cashier"
+      && subtotal > 0
+    ) {
+      const maxDiscount = roundHalfUp((subtotal * settings.maxCashierDiscountBp) / 10000);
+      if (discount > maxDiscount) approvalReason = approvalReason ?? "Desconto acima do limite do caixa.";
+    }
   }
-  if (subtotal > 0 && total === 0) approvalReason = approvalReason ?? "Venda com total zero.";
-  if (lines.some((line) => line.grossCents > 0 && line.totalCents === 0)) {
-    approvalReason = approvalReason ?? "Item gratuito.";
+  if (settings.discountApprovalMode !== "never") {
+    if (subtotal > 0 && total === 0) approvalReason = approvalReason ?? "Venda com total zero.";
+    if (lines.some((line) => line.grossCents > 0 && line.totalCents === 0)) {
+      approvalReason = approvalReason ?? "Item gratuito.";
+    }
   }
 
   return {
@@ -803,15 +962,28 @@ function buildQuote(payload: QuoteInput, currentSession: NonNullable<typeof sess
   };
 }
 
-function validatePayments(payments: PaymentInput[], total: number): { payments: PaymentInput[]; paid: number; change: number } {
-  if (!Array.isArray(payments) || payments.length === 0) fail("PAYMENT_REQUIRED", "Indique pelo menos um pagamento.");
-  const allowed: PaymentMethod[] = ["cash", "card", "pos", "mpesa", "emola", "transfer", "other"];
+const PAYMENT_METHODS: PaymentMethod[] = ["cash", "card", "pos", "mpesa", "emola", "transfer", "other"];
+
+/** Saldo em dívida de uma venda, reutilizado em listagens e filtros. */
+const SALE_OUTSTANDING_SQL = `CASE WHEN s.status = 'completed' AND s.is_credit = 1
+  THEN MAX(0, s.total_cents - s.paid_cents - COALESCE((SELECT SUM(amount_cents) FROM sale_settlements WHERE sale_id = s.id), 0))
+  ELSE 0 END`;
+
+/** Colunas de crédito devolvidas nas listagens de clientes (alias `c`). */
+const CUSTOMER_CREDIT_COLUMNS = `,
+  COALESCE((SELECT SUM(MAX(0, s.total_cents - s.paid_cents - COALESCE((SELECT SUM(ss.amount_cents) FROM sale_settlements ss WHERE ss.sale_id = s.id), 0)))
+            FROM sales s WHERE s.customer_id = c.id AND s.is_credit = 1 AND s.status = 'completed'), 0) AS credit_balance_cents,
+  (SELECT COUNT(*) FROM sales s WHERE s.customer_id = c.id AND s.is_credit = 1 AND s.status = 'completed') AS credit_sale_count`;
+
+function validatePayments(payments: PaymentInput[], total: number, isCredit = false): { payments: PaymentInput[]; paid: number; change: number } {
+  if (!Array.isArray(payments)) fail("PAYMENT_INVALID", "Os pagamentos são inválidos.");
+  if (!isCredit && payments.length === 0) fail("PAYMENT_REQUIRED", "Indique pelo menos um pagamento.");
   const cash = payments.filter((p) => p.method === "cash");
   if (cash.length > 1) fail("PAYMENT_INVALID", "Só pode existir uma linha de dinheiro.");
   let paid = 0;
   let change = 0;
   const normalized = payments.map((p) => {
-    if (!allowed.includes(p.method)) fail("PAYMENT_INVALID", "Método de pagamento inválido.");
+    if (!PAYMENT_METHODS.includes(p.method)) fail("PAYMENT_INVALID", "Método de pagamento inválido.");
     const amount = Math.trunc(Number(p.amountCents));
     if (!Number.isFinite(amount) || amount <= 0) fail("PAYMENT_INVALID", "O valor do pagamento tem de ser positivo.");
     paid += amount;
@@ -823,7 +995,11 @@ function validatePayments(payments: PaymentInput[], total: number): { payments: 
     }
     return { ...p, amountCents: amount, tenderedCents: tendered, reference: p.reference ? String(p.reference).slice(0, 100) : undefined };
   });
-  if (paid !== total) fail("PAYMENT_MISMATCH", `Os pagamentos somam ${(paid / 100).toFixed(2)} MZN e o total é ${(total / 100).toFixed(2)} MZN.`);
+  if (isCredit) {
+    if (paid > total) fail("PAYMENT_MISMATCH", `O valor pago agora (${(paid / 100).toFixed(2)} MZN) não pode ser superior ao total (${(total / 100).toFixed(2)} MZN).`);
+  } else if (paid !== total) {
+    fail("PAYMENT_MISMATCH", `Os pagamentos somam ${(paid / 100).toFixed(2)} MZN e o total é ${(total / 100).toFixed(2)} MZN.`);
+  }
   return { payments: normalized, paid, change };
 }
 
@@ -867,6 +1043,22 @@ function toSale(id: string): Sale | null {
     tenderedCents: Number(row.tendered_cents),
     reference: row.reference ? String(row.reference) : null,
   })) satisfies SalePayment[];
+  const settlements = rows(
+    `SELECT ss.*, u.display_name AS user_name FROM sale_settlements ss
+     LEFT JOIN users u ON u.id = ss.user_id WHERE ss.sale_id = ? ORDER BY ss.created_at, ss.rowid`,
+    [id],
+  ).map((row) => ({
+    id: String(row.id),
+    amountCents: Number(row.amount_cents),
+    method: String(row.method) as PaymentMethod,
+    reference: row.reference ? String(row.reference) : null,
+    note: row.note ? String(row.note) : null,
+    userName: row.user_name ? String(row.user_name) : null,
+    createdAt: String(row.created_at),
+  })) satisfies SaleSettlement[];
+  const isCredit = toBool(sale.is_credit);
+  const settledCents = Number(sale.paid_cents) + settlements.reduce((sum, item) => sum + item.amountCents, 0);
+  const outstandingCents = isCredit && sale.status === "completed" ? Math.max(0, Number(sale.total_cents) - settledCents) : 0;
   return {
     id: String(sale.id),
     receiptNumber: String(sale.receipt_number),
@@ -881,6 +1073,10 @@ function toSale(id: string): Sale | null {
     totalCents: Number(sale.total_cents),
     paidCents: Number(sale.paid_cents),
     changeCents: Number(sale.change_cents),
+    isCredit,
+    settledCents,
+    outstandingCents,
+    settlements,
     note: sale.note ? String(sale.note) : null,
     createdAt: String(sale.created_at),
     voidedAt: sale.voided_at ? String(sale.voided_at) : null,
@@ -910,6 +1106,7 @@ CREATE TABLE IF NOT EXISTS users (
   locked_until TEXT,
   must_change_pin INTEGER NOT NULL DEFAULT 0,
   last_login_at TEXT,
+  login_shortcut INTEGER CHECK (login_shortcut BETWEEN 1 AND 9),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -937,6 +1134,7 @@ CREATE TABLE IF NOT EXISTS settings (
   installation_code TEXT NOT NULL,
   allow_negative_stock INTEGER NOT NULL DEFAULT 1,
   max_cashier_discount_bp INTEGER NOT NULL DEFAULT 500,
+  discount_approval_mode TEXT NOT NULL DEFAULT 'above_limit' CHECK (discount_approval_mode IN ('never','above_limit','always')),
   idle_lock_seconds INTEGER NOT NULL DEFAULT 300,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -1030,6 +1228,21 @@ CREATE TABLE IF NOT EXISTS stock_movements (
   created_at TEXT NOT NULL
 );
 
+-- Registo de facturas já importadas por Excel. document_key é a referência
+-- normalizada (sem acentos, minúsculas, espaços colapsados) usada para bloquear
+-- importações repetidas da mesma factura.
+CREATE TABLE IF NOT EXISTS stock_imports (
+  id TEXT PRIMARY KEY,
+  document_ref TEXT NOT NULL,
+  document_key TEXT NOT NULL UNIQUE,
+  product_count INTEGER NOT NULL,
+  quantity_milli INTEGER NOT NULL,
+  total_cost_cents INTEGER NOT NULL,
+  exchange_rate REAL NOT NULL,
+  user_id TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sales (
   id TEXT PRIMARY KEY,
   receipt_number TEXT NOT NULL UNIQUE,
@@ -1046,6 +1259,7 @@ CREATE TABLE IF NOT EXISTS sales (
   total_cents INTEGER NOT NULL,
   paid_cents INTEGER NOT NULL,
   change_cents INTEGER NOT NULL,
+  is_credit INTEGER NOT NULL DEFAULT 0 CHECK (is_credit IN (0,1)),
   note TEXT,
   created_at TEXT NOT NULL,
   voided_at TEXT,
@@ -1081,6 +1295,19 @@ CREATE TABLE IF NOT EXISTS sale_payments (
   amount_cents INTEGER NOT NULL,
   tendered_cents INTEGER NOT NULL,
   reference TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- Regularizações posteriores de vendas a prazo. Os pagamentos iniciais
+-- continuam em sale_payments para não inflacionar o mix de pagamentos.
+CREATE TABLE IF NOT EXISTS sale_settlements (
+  id TEXT PRIMARY KEY,
+  sale_id TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL,
+  method TEXT NOT NULL CHECK (method IN ('cash','card','pos','mpesa','emola','transfer','other')),
+  reference TEXT,
+  note TEXT,
+  user_id TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -1131,6 +1358,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_shortcut ON users(login_shortcut) WHERE login_shortcut IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_products_variant ON products(sku COLLATE NOCASE, name COLLATE NOCASE, color COLLATE NOCASE) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_products_search ON products(search_text);
@@ -1148,9 +1376,13 @@ CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items(sale_id);
 CREATE INDEX IF NOT EXISTS idx_sale_items_product ON sale_items(product_id);
 CREATE INDEX IF NOT EXISTS idx_stock_product_date ON stock_movements(product_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_stock_sale ON stock_movements(sale_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_imports_key ON stock_imports(document_key);
+CREATE INDEX IF NOT EXISTS idx_stock_imports_created ON stock_imports(created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(expires_at, used_at);
+CREATE INDEX IF NOT EXISTS idx_sale_settlements_sale ON sale_settlements(sale_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_sales_credit ON sales(is_credit, status, customer_id);
 `;
 
 async function migrate(): Promise<void> {
@@ -1278,6 +1510,142 @@ async function migrate(): Promise<void> {
       throw error;
     }
   }
+  if (Number(one("PRAGMA user_version")?.user_version ?? 0) === 4) {
+    const backup = (sqlite3.capi.sqlite3_js_db_export(db.pointer) as Uint8Array).slice();
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "");
+    await writeBackupFile(`pre-migrate-v4-${stamp}.db`, backup);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        CREATE TABLE stock_imports (
+          id TEXT PRIMARY KEY,
+          document_ref TEXT NOT NULL,
+          document_key TEXT NOT NULL UNIQUE,
+          product_count INTEGER NOT NULL,
+          quantity_milli INTEGER NOT NULL,
+          total_cost_cents INTEGER NOT NULL,
+          exchange_rate REAL NOT NULL,
+          user_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX idx_stock_imports_key ON stock_imports(document_key);
+        CREATE INDEX idx_stock_imports_created ON stock_imports(created_at);
+        PRAGMA user_version = 5;
+      `);
+      // Reconhece imports anteriores a esta versão: a tabela de registo não
+      // existia, pelo que as suas facturas têm de ser recuperadas dos movimentos.
+      const legacyImports = rows(
+        `SELECT document_ref,
+                COUNT(DISTINCT product_id) AS product_count,
+                SUM(qty_milli) AS quantity_milli,
+                SUM(COALESCE(unit_cost_cents, 0)) AS total_cost_cents,
+                MIN(user_id) AS user_id,
+                MIN(created_at) AS created_at
+         FROM stock_movements
+         WHERE type = 'purchase_in'
+           AND reason LIKE 'Importação Excel%'
+           AND document_ref IS NOT NULL
+           AND TRIM(document_ref) <> ''
+         GROUP BY lower(trim(document_ref))`,
+      );
+      const seenRefs = new Set<string>();
+      for (const legacy of legacyImports) {
+        const ref = String(legacy.document_ref ?? "").trim();
+        const key = normalizeDocumentRef(ref);
+        if (!key || seenRefs.has(key)) continue;
+        seenRefs.add(key);
+        run(
+          `INSERT INTO stock_imports (
+             id, document_ref, document_key, product_count, quantity_milli,
+             total_cost_cents, exchange_rate, user_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+          [
+            uuid(),
+            ref,
+            key,
+            Number(legacy.product_count ?? 0),
+            Number(legacy.quantity_milli ?? 0),
+            Number(legacy.total_cost_cents ?? 0),
+            legacy.user_id ? String(legacy.user_id) : null,
+            String(legacy.created_at ?? nowIso()),
+          ],
+        );
+      }
+      run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)", [5, nowIso()]);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  if (Number(one("PRAGMA user_version")?.user_version ?? 0) === 5) {
+    const backup = (sqlite3.capi.sqlite3_js_db_export(db.pointer) as Uint8Array).slice();
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "");
+    await writeBackupFile(`pre-migrate-v5-${stamp}.db`, backup);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        ALTER TABLE sales ADD COLUMN is_credit INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE sale_settlements (
+          id TEXT PRIMARY KEY,
+          sale_id TEXT NOT NULL,
+          amount_cents INTEGER NOT NULL,
+          method TEXT NOT NULL CHECK (method IN ('cash','card','pos','mpesa','emola','transfer','other')),
+          reference TEXT,
+          note TEXT,
+          user_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_sale_settlements_sale ON sale_settlements(sale_id, created_at);
+        CREATE INDEX idx_sales_credit ON sales(is_credit, status, customer_id);
+        PRAGMA user_version = 6;
+      `);
+      run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)", [6, nowIso()]);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  if (Number(one("PRAGMA user_version")?.user_version ?? 0) === 6) {
+    const backup = (sqlite3.capi.sqlite3_js_db_export(db.pointer) as Uint8Array).slice();
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "");
+    await writeBackupFile(`pre-migrate-v6-${stamp}.db`, backup);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        ALTER TABLE users ADD COLUMN login_shortcut INTEGER CHECK (login_shortcut BETWEEN 1 AND 9);
+        CREATE UNIQUE INDEX idx_users_login_shortcut ON users(login_shortcut) WHERE login_shortcut IS NOT NULL;
+        PRAGMA user_version = 7;
+      `);
+      run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)", [7, nowIso()]);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  if (Number(one("PRAGMA user_version")?.user_version ?? 0) === 7) {
+    const backup = (sqlite3.capi.sqlite3_js_db_export(db.pointer) as Uint8Array).slice();
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "");
+    await writeBackupFile(`pre-migrate-v7-${stamp}.db`, backup);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        ALTER TABLE settings ADD COLUMN discount_approval_mode TEXT NOT NULL DEFAULT 'above_limit'
+          CHECK (discount_approval_mode IN ('never','above_limit','always'));
+        PRAGMA user_version = 8;
+      `);
+      run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)", [8, nowIso()]);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  // Bases migradas de versões anteriores podem ter utilizadores sem atalho
+  // (criados antes dessa funcionalidade). Completar aqui é idempotente.
+  ensureLoginShortcuts();
 }
 
 async function openOpfsDatabase() {
@@ -1458,8 +1826,8 @@ async function createSetup(payload: any): Promise<SessionInfo & { recoveryCode: 
       ],
     );
     run(
-      `INSERT INTO users (id, username, display_name, role, active, pin_hash, pin_salt, pin_iterations, pin_algo, failed_attempts, must_change_pin, created_at, updated_at)
-       VALUES (?, ?, ?, 'owner', 1, ?, ?, ?, 'PBKDF2-SHA-256', 0, 0, ?, ?)`,
+      `INSERT INTO users (id, username, display_name, role, active, pin_hash, pin_salt, pin_iterations, pin_algo, failed_attempts, must_change_pin, login_shortcut, created_at, updated_at)
+       VALUES (?, ?, ?, 'owner', 1, ?, ?, ?, 'PBKDF2-SHA-256', 0, 0, 1, ?, ?)`,
       [ownerId, username, ownerName, pinData.hash, pinData.salt, pinData.iterations, now, now],
     );
     run("INSERT INTO recovery_codes (id, user_id, hash, salt, iterations, created_at) VALUES (?, ?, ?, ?, ?, ?)", [
@@ -1483,7 +1851,7 @@ async function createSetup(payload: any): Promise<SessionInfo & { recoveryCode: 
   session = { token: uuid(), userId: ownerId, role: "owner", username, displayName: ownerName, lastActivity: Date.now() };
   return {
     token: session.token,
-    user: { id: ownerId, username, displayName: ownerName, role: "owner", active: true, mustChangePin: false, lastLoginAt: null },
+    user: { id: ownerId, username, displayName: ownerName, role: "owner", active: true, mustChangePin: false, lastLoginAt: null, loginShortcut: 1 },
     settings: getSettings(),
     recoveryCode: recovery,
   };
@@ -1558,7 +1926,9 @@ async function completeSale(payload: SaleInput): Promise<Sale> {
   db.exec("BEGIN IMMEDIATE");
   try {
     const quote = buildQuote(payload, current);
-    const { payments, paid, change } = validatePayments(payload.payments ?? [], quote.totalCents);
+    const isCredit = payload.isCredit === true;
+    if (isCredit && !payload.customerId) fail("CUSTOMER_REQUIRED", "As vendas a prazo exigem um cliente identificado.");
+    const { payments, paid, change } = validatePayments(payload.payments ?? [], quote.totalCents, isCredit);
     if (quote.requiresApproval) consumeApproval(payload.approvalToken, "sale.exception", quote.discountCents);
     else if (payload.approvalToken) consumeApproval(payload.approvalToken, "sale.exception", quote.discountCents);
 
@@ -1573,8 +1943,8 @@ async function completeSale(payload: SaleInput): Promise<Sale> {
     const now = nowIso();
 
     run(
-      `INSERT INTO sales (id, receipt_number, status, cashier_id, cashier_name_snapshot, customer_id, customer_name_snapshot, customer_nif_snapshot, subtotal_cents, discount_cents, tax_cents, tax_applied, total_cents, paid_cents, change_cents, note, created_at)
-       VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO sales (id, receipt_number, status, cashier_id, cashier_name_snapshot, customer_id, customer_name_snapshot, customer_nif_snapshot, subtotal_cents, discount_cents, tax_cents, tax_applied, total_cents, paid_cents, change_cents, is_credit, note, created_at)
+       VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         saleId,
         receiptNumber,
@@ -1590,6 +1960,7 @@ async function completeSale(payload: SaleInput): Promise<Sale> {
         quote.totalCents,
         paid,
         change,
+        isCredit ? 1 : 0,
         payload.note ? String(payload.note).slice(0, 500) : null,
         now,
       ],
@@ -1644,7 +2015,18 @@ async function completeSale(payload: SaleInput): Promise<Sale> {
       itemCount: quote.lines.length,
       discountCents: quote.discountCents,
       paymentMethods: payments.map((p) => p.method),
+      isCredit,
+      paidCents: paid,
     });
+    if (isCredit) {
+      audit("sale.credit", "sale", saleId, null, {
+        receiptNumber,
+        customerName: customer ? String(customer.name) : null,
+        totalCents: quote.totalCents,
+        paidCents: paid,
+        outstandingCents: Math.max(0, quote.totalCents - paid),
+      });
+    }
     db.exec("COMMIT");
     const sale = toSale(saleId);
     if (!sale) fail("INTERNAL", "A venda foi gravada mas não pôde ser lida.");
@@ -1657,6 +2039,72 @@ async function completeSale(payload: SaleInput): Promise<Sale> {
     }
     throw error;
   }
+}
+
+type SettleSalePayload = {
+  id?: string;
+  amountCents?: number;
+  method?: PaymentMethod;
+  reference?: string | null;
+  note?: string | null;
+};
+
+async function settleSale(payload: SettleSalePayload): Promise<Sale> {
+  const current = requireSession(["owner", "manager", "cashier"]);
+  const saleId = String(payload.id ?? "");
+  const sale = one("SELECT * FROM sales WHERE id = ?", [saleId]);
+  if (!sale) fail("SALE_NOT_FOUND", "Venda não encontrada.");
+  if (sale.status !== "completed") fail("SALE_INVALID", "Não é possível regularizar uma venda anulada.");
+  if (!toBool(sale.is_credit)) fail("SALE_INVALID", "Esta venda não é a prazo.");
+
+  const amountCents = Math.trunc(Number(payload.amountCents));
+  if (!Number.isFinite(amountCents) || amountCents <= 0) fail("PAYMENT_INVALID", "Indique um valor superior a zero.");
+  const method = String(payload.method ?? "") as PaymentMethod;
+  if (!PAYMENT_METHODS.includes(method)) fail("PAYMENT_INVALID", "Método de pagamento inválido.");
+
+  const alreadySettled = Number(
+    one("SELECT COALESCE(SUM(amount_cents), 0) AS total FROM sale_settlements WHERE sale_id = ?", [saleId])?.total ?? 0,
+  );
+  const outstandingCents = Math.max(0, Number(sale.total_cents) - Number(sale.paid_cents) - alreadySettled);
+  if (outstandingCents <= 0) fail("SALE_SETTLED", "Esta venda já está liquidada.");
+  if (amountCents > outstandingCents) {
+    fail("PAYMENT_MISMATCH", `Só falta ${(outstandingCents / 100).toFixed(2)} MZN para liquidar esta venda.`);
+  }
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    run(
+      `INSERT INTO sale_settlements (id, sale_id, amount_cents, method, reference, note, user_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        uuid(),
+        saleId,
+        amountCents,
+        method,
+        payload.reference ? String(payload.reference).trim().slice(0, 100) || null : null,
+        payload.note ? String(payload.note).trim().slice(0, 300) || null : null,
+        current.userId,
+        nowIso(),
+      ],
+    );
+    audit("sale.settlement", "sale", saleId, { outstandingCents }, {
+      receiptNumber: String(sale.receipt_number),
+      amountCents,
+      method,
+      outstandingCents: outstandingCents - amountCents,
+    });
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* ignore */
+    }
+    throw error;
+  }
+  const updated = toSale(saleId);
+  if (!updated) fail("INTERNAL", "A regularização foi gravada mas a venda não pôde ser lida.");
+  return updated;
 }
 
 async function voidSale(id: string, reason: string, approvalToken?: string | null): Promise<Sale> {
@@ -1840,6 +2288,7 @@ async function purgeOperationalData(payload: Record<string, unknown>): Promise<{
     run("DELETE FROM approvals");
     run("DELETE FROM product_barcodes");
     run("DELETE FROM stock_movements");
+    run("DELETE FROM sale_settlements");
     run("DELETE FROM sale_payments");
     run("DELETE FROM sale_items");
     run("DELETE FROM sales");
@@ -1924,7 +2373,7 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
     case "auth.users": {
       await ensureDb();
       return {
-        data: rows("SELECT id, username, display_name, role, active, must_change_pin, last_login_at FROM users WHERE active = 1 ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END, display_name").map(toUser),
+        data: rows("SELECT id, username, display_name, role, active, must_change_pin, last_login_at, login_shortcut FROM users WHERE active = 1 ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END, display_name").map(toUser),
       };
     }
     case "auth.login": {
@@ -1940,6 +2389,9 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
     }
     case "auth.lock":
       session = null;
+      return { data: { ok: true } };
+    case "auth.touch":
+      requireSession();
       return { data: { ok: true } };
     case "auth.recoverOwner":
       return { data: await recoverOwner(payload) };
@@ -1967,8 +2419,12 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
       const current = requireSession(["owner"]);
       const before = getSettings();
       const now = nowIso();
+      const discountApprovalMode = String(payload.discountApprovalMode ?? before.discountApprovalMode);
+      if (!["never", "above_limit", "always"].includes(discountApprovalMode)) {
+        fail("VALIDATION", "Regra de aprovação de descontos inválida.");
+      }
       run(
-        `UPDATE settings SET store_name = ?, nif = ?, address = ?, phone = ?, receipt_footer = ?, installation_code = ?, allow_negative_stock = ?, max_cashier_discount_bp = ?, idle_lock_seconds = ?, updated_at = ? WHERE id = 'default'`,
+        `UPDATE settings SET store_name = ?, nif = ?, address = ?, phone = ?, receipt_footer = ?, installation_code = ?, allow_negative_stock = ?, max_cashier_discount_bp = ?, discount_approval_mode = ?, idle_lock_seconds = ?, updated_at = ? WHERE id = 'default'`,
         [
           String(payload.storeName ?? before.storeName).trim(),
           String(payload.nif ?? before.nif).trim(),
@@ -1978,6 +2434,7 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
           String(payload.installationCode ?? before.installationCode).trim().toUpperCase().slice(0, 8),
           toBool(payload.allowNegativeStock ?? before.allowNegativeStock) ? 1 : 0,
           Math.max(0, Math.min(10000, Math.trunc(Number(payload.maxCashierDiscountBp ?? before.maxCashierDiscountBp)))),
+          discountApprovalMode,
           Math.max(60, Math.min(1800, Math.trunc(Number(payload.idleLockSeconds ?? before.idleLockSeconds)))),
           now,
         ],
@@ -1990,7 +2447,7 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
       return { data: await purgeOperationalData(payload) };
     case "user.list": {
       requireSession(["owner"]);
-      return { data: rows("SELECT id, username, display_name, role, active, must_change_pin, last_login_at FROM users ORDER BY created_at").map(toUser) };
+      return { data: rows("SELECT id, username, display_name, role, active, must_change_pin, last_login_at, login_shortcut FROM users ORDER BY created_at").map(toUser) };
     }
     case "user.create": {
       const current = requireSession(["owner"]);
@@ -2001,14 +2458,17 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
       if (!/^[a-z0-9._-]{3,32}$/.test(username)) fail("VALIDATION", "Utilizador inválido.");
       if (!displayName) fail("VALIDATION", "Indique o nome do utilizador.");
       if (!["owner", "manager", "cashier"].includes(role)) fail("VALIDATION", "Perfil inválido.");
+      const loginShortcut = payload.loginShortcut === undefined
+        ? nextFreeLoginShortcut()
+        : parseLoginShortcut(payload.loginShortcut);
       const data = await hashPin(pin);
       const now = nowIso();
       const id = uuid();
       run(
-        "INSERT INTO users (id, username, display_name, role, active, pin_hash, pin_salt, pin_iterations, pin_algo, must_change_pin, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?, 'PBKDF2-SHA-256', 1, ?, ?)",
-        [id, username, displayName, role, data.hash, data.salt, data.iterations, now, now],
+        "INSERT INTO users (id, username, display_name, role, active, pin_hash, pin_salt, pin_iterations, pin_algo, must_change_pin, login_shortcut, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?, 'PBKDF2-SHA-256', 1, ?, ?, ?)",
+        [id, username, displayName, role, data.hash, data.salt, data.iterations, loginShortcut, now, now],
       );
-      audit("user.created", "user", id, null, { username, role }, current.userId);
+      audit("user.created", "user", id, null, { username, role, loginShortcut }, current.userId);
       return { data: toUser(one("SELECT * FROM users WHERE id = ?", [id]) as Row) };
     }
     case "user.update": {
@@ -2020,15 +2480,21 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
         const owners = Number(one("SELECT COUNT(*) AS c FROM users WHERE role = 'owner' AND active = 1")?.c ?? 0);
         if (owners <= 1) fail("FORBIDDEN", "Não pode desactivar o último proprietário.");
       }
+      const role = String(payload.role ?? user.role);
+      if (!["owner", "manager", "cashier"].includes(role)) fail("VALIDATION", "Perfil inválido.");
+      const loginShortcut = payload.loginShortcut === undefined
+        ? (user.login_shortcut === null ? null : Number(user.login_shortcut))
+        : parseLoginShortcut(payload.loginShortcut, String(user.id));
       const before = toUser(user);
-      run("UPDATE users SET display_name = ?, role = ?, active = ?, updated_at = ? WHERE id = ?", [
+      run("UPDATE users SET display_name = ?, role = ?, active = ?, login_shortcut = ?, updated_at = ? WHERE id = ?", [
         String(payload.displayName ?? user.display_name).trim() || String(user.display_name),
-        String(payload.role ?? user.role),
+        role,
         active ? 1 : 0,
+        loginShortcut,
         nowIso(),
         user.id,
       ]);
-      audit("user.updated", "user", String(user.id), before, { active }, current.userId);
+      audit("user.updated", "user", String(user.id), before, { active, role, loginShortcut }, current.userId);
       return { data: toUser(one("SELECT * FROM users WHERE id = ?", [user.id]) as Row) };
     }
     case "user.resetPin": {
@@ -2345,14 +2811,24 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
       requireSession();
       const productId = String(payload.productId ?? "");
       if (!productId) fail("VALIDATION", "Indique o produto.");
-      const total = Number(one("SELECT COUNT(*) AS total FROM stock_movements WHERE product_id = ?", [productId])?.total ?? 0);
+      const dateBinds: unknown[] = [];
+      let dateWhere = "";
+      if (payload.from) {
+        dateWhere += " AND m.created_at >= ?";
+        dateBinds.push(String(payload.from));
+      }
+      if (payload.to) {
+        dateWhere += " AND m.created_at < ?";
+        dateBinds.push(String(payload.to));
+      }
+      const total = Number(one(`SELECT COUNT(*) AS total FROM stock_movements m WHERE m.product_id = ?${dateWhere}`, [productId, ...dateBinds])?.total ?? 0);
       const requested = paginationInput(payload, 25);
       const page = resolvePage(requested.page, requested.pageSize, total);
       const movements = rows(
         `SELECT m.*, p.name AS product_name, p.color AS product_color, u.display_name AS user_name
          FROM stock_movements m JOIN products p ON p.id = m.product_id LEFT JOIN users u ON u.id = m.user_id
-         WHERE m.product_id = ? ORDER BY m.created_at DESC, m.rowid DESC LIMIT ? OFFSET ?`,
-        [productId, requested.pageSize, (page - 1) * requested.pageSize],
+         WHERE m.product_id = ?${dateWhere} ORDER BY m.created_at DESC, m.rowid DESC LIMIT ? OFFSET ?`,
+        [productId, ...dateBinds, requested.pageSize, (page - 1) * requested.pageSize],
       ).map((row) => ({
         id: String(row.id),
         productId: String(row.product_id),
@@ -2377,19 +2853,21 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
     }
     case "stock.import.preview":
       return { data: previewStockImport(payload.items) };
+    case "stock.import.check":
+      return { data: checkStockImportDocument(payload.documentRef) };
     case "stock.import.commit":
       return { data: commitStockImport(payload) };
     case "customer.list": {
       requireSession();
       const query = norm(payload.query);
       const binds: unknown[] = [];
-      let where = "WHERE deleted_at IS NULL";
+      let where = "WHERE c.deleted_at IS NULL";
       if (query) {
-        where += " AND (lower(name) LIKE ? OR phone_normalized LIKE ? OR nif LIKE ?)";
+        where += " AND (lower(c.name) LIKE ? OR c.phone_normalized LIKE ? OR c.nif LIKE ?)";
         binds.push(`%${query}%`, `%${query}%`, `%${query}%`);
       }
       return {
-        data: rows(`SELECT * FROM customers ${where} ORDER BY name LIMIT 200`, binds).map((row) => ({
+        data: rows(`SELECT c.*${CUSTOMER_CREDIT_COLUMNS} FROM customers c ${where} ORDER BY c.name LIMIT 200`, binds).map((row) => ({
           id: String(row.id),
           name: String(row.name),
           phone: String(row.phone),
@@ -2397,6 +2875,8 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
           email: String(row.email),
           address: String(row.address),
           notes: String(row.notes),
+          creditBalanceCents: Number(row.credit_balance_cents ?? 0),
+          creditSaleCount: Number(row.credit_sale_count ?? 0),
         })) as Customer[],
       };
     }
@@ -2404,14 +2884,14 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
       requireSession();
       const query = norm(payload.query);
       const where = query
-        ? "WHERE deleted_at IS NULL AND (lower(name) LIKE ? OR phone_normalized LIKE ? OR nif LIKE ?)"
-        : "WHERE deleted_at IS NULL";
+        ? "WHERE c.deleted_at IS NULL AND (lower(c.name) LIKE ? OR c.phone_normalized LIKE ? OR c.nif LIKE ?)"
+        : "WHERE c.deleted_at IS NULL";
       const binds: unknown[] = query ? [`%${query}%`, `%${query}%`, `%${query}%`] : [];
-      const total = Number(one(`SELECT COUNT(*) AS total FROM customers ${where}`, binds)?.total ?? 0);
+      const total = Number(one(`SELECT COUNT(*) AS total FROM customers c ${where}`, binds)?.total ?? 0);
       const requested = paginationInput(payload, 12);
       const page = resolvePage(requested.page, requested.pageSize, total);
       const items = rows(
-        `SELECT * FROM customers ${where} ORDER BY name, id LIMIT ? OFFSET ?`,
+        `SELECT c.*${CUSTOMER_CREDIT_COLUMNS} FROM customers c ${where} ORDER BY c.name, c.id LIMIT ? OFFSET ?`,
         [...binds, requested.pageSize, (page - 1) * requested.pageSize],
       ).map((row) => ({
         id: String(row.id),
@@ -2421,6 +2901,8 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
         email: String(row.email),
         address: String(row.address),
         notes: String(row.notes),
+        creditBalanceCents: Number(row.credit_balance_cents ?? 0),
+        creditSaleCount: Number(row.credit_sale_count ?? 0),
       })) as Customer[];
       return { data: { items, page, pageSize: requested.pageSize, total } satisfies PagedResult<Customer> };
     }
@@ -2589,6 +3071,11 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
         where += " AND s.created_at < ?";
         binds.push(String(payload.to));
       }
+      if (payload.creditStatus === "pending") {
+        where += ` AND ${SALE_OUTSTANDING_SQL} > 0`;
+      } else if (payload.creditStatus === "settled") {
+        where += ` AND s.is_credit = 1 AND s.status = 'completed' AND ${SALE_OUTSTANDING_SQL} = 0`;
+      }
       const summary = one(
         `SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN s.status = 'completed' THEN s.total_cents ELSE 0 END), 0) AS completed_total
          FROM sales s ${where}`,
@@ -2600,6 +3087,7 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
       const pageBinds = [...binds, requested.pageSize, (page - 1) * requested.pageSize];
       const items = rows(
         `SELECT s.id, s.receipt_number, s.status, s.cashier_name_snapshot, s.customer_name_snapshot, s.total_cents, s.created_at,
+                s.is_credit, ${SALE_OUTSTANDING_SQL} AS outstanding_cents,
                 (SELECT COUNT(*) FROM sale_items WHERE sale_id = s.id) AS item_count
          FROM sales s ${where} ORDER BY s.created_at DESC, s.rowid DESC LIMIT ? OFFSET ?`,
         pageBinds,
@@ -2610,6 +3098,8 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
         cashierName: String(row.cashier_name_snapshot),
         customerName: row.customer_name_snapshot ? String(row.customer_name_snapshot) : null,
         totalCents: Number(row.total_cents),
+        isCredit: toBool(row.is_credit),
+        outstandingCents: Number(row.outstanding_cents),
         createdAt: String(row.created_at),
         itemCount: Number(row.item_count),
       })) as SaleSummary[];
@@ -2644,7 +3134,9 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
       binds.push(limit);
       return {
         data: rows(
-          `SELECT s.id, s.receipt_number, s.status, s.cashier_name_snapshot, s.customer_name_snapshot, s.total_cents, s.created_at, (SELECT COUNT(*) FROM sale_items WHERE sale_id = s.id) AS item_count
+          `SELECT s.id, s.receipt_number, s.status, s.cashier_name_snapshot, s.customer_name_snapshot, s.total_cents, s.created_at,
+                  s.is_credit, ${SALE_OUTSTANDING_SQL} AS outstanding_cents,
+                  (SELECT COUNT(*) FROM sale_items WHERE sale_id = s.id) AS item_count
            FROM sales s ${where} ORDER BY s.created_at DESC LIMIT ?`,
           binds,
         ).map((row) => ({
@@ -2654,6 +3146,8 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
           cashierName: String(row.cashier_name_snapshot),
           customerName: row.customer_name_snapshot ? String(row.customer_name_snapshot) : null,
           totalCents: Number(row.total_cents),
+          isCredit: toBool(row.is_credit),
+          outstandingCents: Number(row.outstanding_cents),
           createdAt: String(row.created_at),
           itemCount: Number(row.item_count),
         })) as SaleSummary[],
@@ -2667,6 +3161,8 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
     }
     case "sale.void":
       return { data: await voidSale(String(payload.id ?? ""), String(payload.reason ?? ""), payload.approvalToken) };
+    case "sale.settle":
+      return { data: await settleSale(payload) };
     case "report.summary": {
       requireSession(["owner", "manager", "cashier"]);
       const from = String(payload.from ?? new Date(new Date().setHours(0, 0, 0, 0)).toISOString());
@@ -2686,11 +3182,27 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
         `SELECT si.name_snapshot AS name, SUM(si.qty_milli) AS qty, SUM(si.total_cents) AS total FROM sale_items si JOIN sales s ON s.id = si.sale_id WHERE s.status = 'completed' AND s.created_at >= ? AND s.created_at < ? GROUP BY si.product_id, si.name_snapshot ORDER BY total DESC LIMIT 10`,
         [from, to],
       ).map((row) => ({ name: String(row.name), qtyMilli: Number(row.qty), totalCents: Number(row.total) }));
+      const dailySales = rows(
+        `SELECT strftime('%Y-%m-%d', datetime(created_at, '+2 hours')) AS day, COUNT(*) AS c, COALESCE(SUM(total_cents), 0) AS total
+         FROM sales WHERE status = 'completed' AND created_at >= ? AND created_at < ?
+         GROUP BY day ORDER BY day`,
+        [from, to],
+      ).map((row) => ({ date: String(row.day), totalCents: Number(row.total), count: Number(row.c) }));
+      const credit = one(
+        `SELECT COALESCE(SUM(CASE WHEN s.is_credit = 1 THEN 1 ELSE 0 END), 0) AS c,
+                COALESCE(SUM(CASE WHEN s.is_credit = 1 THEN s.total_cents ELSE 0 END), 0) AS total,
+                COALESCE(SUM(${SALE_OUTSTANDING_SQL}), 0) AS outstanding
+         FROM sales s WHERE s.status = 'completed' AND s.created_at >= ? AND s.created_at < ?`,
+        [from, to],
+      );
       return {
         data: {
           from,
           to,
           salesCount: count,
+          creditSalesCount: Number(credit?.c ?? 0),
+          creditTotalCents: Number(credit?.total ?? 0),
+          creditOutstandingCents: Number(credit?.outstanding ?? 0),
           subtotalCents: Number(totals?.subtotal ?? 0),
           discountCents: Number(totals?.discount ?? 0),
           taxCents: Number(totals?.tax ?? 0),
@@ -2698,6 +3210,7 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
           averageCents: count > 0 ? Math.round(total / count) : 0,
           byMethod,
           topProducts,
+          dailySales,
           lowStock: lowStockProducts(),
         } as ReportSummary,
       };
@@ -2728,7 +3241,7 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
         ? payload.actionMatches.map((action: unknown) => String(action)).slice(0, 100)
         : [];
       const binds: unknown[] = [];
-      let where = "";
+      const filters: string[] = [];
       if (query || actionMatches.length > 0) {
         const predicates = [
           "lower(a.action) LIKE ?",
@@ -2741,8 +3254,17 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
           predicates.push(`a.action IN (${actionMatches.map(() => "?").join(",")})`);
           binds.push(...actionMatches);
         }
-        where = `WHERE (${predicates.join(" OR ")})`;
+        filters.push(`(${predicates.join(" OR ")})`);
       }
+      if (payload.from) {
+        filters.push("a.created_at >= ?");
+        binds.push(String(payload.from));
+      }
+      if (payload.to) {
+        filters.push("a.created_at < ?");
+        binds.push(String(payload.to));
+      }
+      const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
       const joins = "FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id";
       const total = Number(one(`SELECT COUNT(*) AS total ${joins} ${where}`, binds)?.total ?? 0);
       const requested = paginationInput(payload, 25);

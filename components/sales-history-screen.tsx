@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Ban, Eye, Printer, RefreshCw, Search } from "lucide-react";
+import { Ban, Eye, Printer, RefreshCw, Search, Wallet } from "lucide-react";
 import { useApp, errorMessage } from "@/lib/app-context";
-import type { Sale, SalePageResult, SaleSummary } from "@/lib/db/protocol";
+import type { PaymentMethod, Sale, SalePageResult, SaleSummary } from "@/lib/db/protocol";
 import { PAYMENT_LABELS } from "@/lib/db/protocol";
-import { formatDateTime, formatMzn, formatQty, formatSaleUnit, maputoDayFromInput, todayInput } from "@/lib/format";
-import { Badge, EmptyState, Field, LoadingPanel, Note, PageHeader } from "@/components/shared";
+import { formatDateTime, formatMzn, formatMznPlain, formatQty, formatSaleUnit, maputoDayFromInput, parseMzn } from "@/lib/format";
+import { getDateRangePreset, type DateRange } from "@/lib/date-range";
+import { Badge, EmptyState, Field, LoadingPanel, MoneyInput, Note, PageHeader, Select } from "@/components/shared";
+import { DateRangeFilter } from "@/components/date-range-filter";
 import { ReceiptDialog } from "@/components/receipt";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,9 +20,9 @@ const PAGE_SIZE = 25;
 
 export function SalesHistoryScreen() {
   const { session, call, toast } = useApp();
-  const [from, setFrom] = useState(todayInput());
-  const [to, setTo] = useState(todayInput());
+  const [range, setRange] = useState<DateRange>(() => getDateRangePreset("today"));
   const [query, setQuery] = useState("");
+  const [creditStatus, setCreditStatus] = useState<"all" | "pending" | "settled">("all");
   const [sales, setSales] = useState<SaleSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [completedTotalCents, setCompletedTotalCents] = useState(0);
@@ -35,14 +37,21 @@ export function SalesHistoryScreen() {
   const [approvalPin, setApprovalPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [settleOpen, setSettleOpen] = useState(false);
+  const [settleAmountInput, setSettleAmountInput] = useState("");
+  const [settleMethod, setSettleMethod] = useState<PaymentMethod>("cash");
+  const [settleReference, setSettleReference] = useState("");
+  const [settleNote, setSettleNote] = useState("");
+  const [settleError, setSettleError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const result = await call<SalePageResult>("sale.page", {
         query,
-        from: maputoDayFromInput(from),
-        to: maputoDayFromInput(to, true),
+        from: maputoDayFromInput(range.from),
+        to: maputoDayFromInput(range.to, true),
+        creditStatus,
         page,
         pageSize: PAGE_SIZE,
       });
@@ -55,7 +64,7 @@ export function SalesHistoryScreen() {
     } finally {
       setLoading(false);
     }
-  }, [call, from, to, page, query, toast]);
+  }, [call, creditStatus, range.from, range.to, page, query, toast]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 250);
@@ -102,6 +111,52 @@ export function SalesHistoryScreen() {
     }
   }
 
+  function openSettleDialog() {
+    if (!detail) return;
+    setSettleAmountInput(formatMznPlain(detail.outstandingCents));
+    setSettleMethod("cash");
+    setSettleReference("");
+    setSettleNote("");
+    setSettleError(null);
+    setSettleOpen(true);
+  }
+
+  async function settleSale() {
+    if (!detail) return;
+    const amountCents = parseMzn(settleAmountInput);
+    if (amountCents <= 0 || amountCents > detail.outstandingCents) {
+      setSettleError(`Indique um valor entre 0,01 e ${formatMzn(detail.outstandingCents)}.`);
+      return;
+    }
+    setBusy(true);
+    setSettleError(null);
+    try {
+      const updated = await call<Sale>("sale.settle", {
+        id: detail.id,
+        amountCents,
+        method: settleMethod,
+        reference: settleReference,
+        note: settleNote,
+      });
+      setDetail(updated);
+      setSettleOpen(false);
+      setSettleAmountInput("");
+      setSettleReference("");
+      setSettleNote("");
+      toast(
+        updated.outstandingCents > 0
+          ? `Recebido ${formatMzn(amountCents)}. Falta ${formatMzn(updated.outstandingCents)}.`
+          : `Venda ${updated.receiptNumber} liquidada.`,
+        "success",
+      );
+      await load();
+    } catch (err) {
+      setSettleError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount);
 
@@ -117,14 +172,25 @@ export function SalesHistoryScreen() {
         }
       />
 
-      <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <Field label="De" htmlFor="historyFrom">
-          <Input id="historyFrom" type="date" value={from} onChange={(event) => { setFrom(event.target.value); setPage(1); }} />
+      <div className="mb-4 grid gap-2 md:grid-cols-[minmax(0,16rem)_minmax(0,12rem)_minmax(0,1fr)]">
+        <Field label="Período">
+          <DateRangeFilter
+            value={range}
+            onChange={(next) => { setRange(next); setPage(1); }}
+          />
         </Field>
-        <Field label="Até" htmlFor="historyTo">
-          <Input id="historyTo" type="date" value={to} onChange={(event) => { setTo(event.target.value); setPage(1); }} />
+        <Field label="Crédito" htmlFor="historyCredit">
+          <Select
+            id="historyCredit"
+            value={creditStatus}
+            onChange={(event) => { setCreditStatus(event.target.value as typeof creditStatus); setPage(1); }}
+          >
+            <option value="all">Todas as vendas</option>
+            <option value="pending">A prazo pendente</option>
+            <option value="settled">A prazo liquidada</option>
+          </Select>
         </Field>
-        <Field label="Pesquisar" htmlFor="historyQuery" className="sm:col-span-2">
+        <Field label="Pesquisar" htmlFor="historyQuery">
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input id="historyQuery" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Nº do recibo ou cliente…" className="pl-8" />
@@ -140,7 +206,7 @@ export function SalesHistoryScreen() {
       {loading ? (
         <LoadingPanel />
       ) : sales.length === 0 ? (
-        <EmptyState title="Sem vendas no período" description="Ajuste as datas ou conclua uma venda no ponto de venda." />
+        <EmptyState title="Sem vendas no período" description="Ajuste o período ou a pesquisa, ou conclua uma venda no ponto de venda." />
       ) : (
         <>
           <div className="overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
@@ -165,7 +231,15 @@ export function SalesHistoryScreen() {
                     <TableCell className="text-right tabular-nums">{sale.itemCount}</TableCell>
                     <TableCell className="text-right font-medium tabular-nums">{formatMzn(sale.totalCents)}</TableCell>
                     <TableCell>
-                      {sale.status === "voided" ? <Badge tone="danger">Anulada</Badge> : <Badge tone="success">Concluída</Badge>}
+                      {sale.status === "voided" ? (
+                        <Badge tone="danger">Anulada</Badge>
+                      ) : sale.isCredit ? (
+                        sale.outstandingCents > 0
+                          ? <Badge tone="warning">A prazo · {formatMzn(sale.outstandingCents)}</Badge>
+                          : <Badge tone="success">Liquidada</Badge>
+                      ) : (
+                        <Badge tone="success">Concluída</Badge>
+                      )}
                     </TableCell>
                     <TableCell>
                       <Button variant="ghost" size="icon-sm" aria-label="Ver venda">
@@ -233,6 +307,31 @@ export function SalesHistoryScreen() {
                   <Row label="Troco" value={formatMzn(detail.changeCents)} />
                 </div>
               </div>
+              {detail.isCredit ? (
+                <div className="rounded-lg border border-emerald-600/30 bg-emerald-50/50 p-3 text-sm dark:bg-emerald-950/20">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <p className="font-medium">Venda a prazo</p>
+                    <Badge tone={detail.outstandingCents > 0 ? "warning" : "success"}>
+                      {detail.outstandingCents > 0 ? `Falta ${formatMzn(detail.outstandingCents)}` : "Liquidada"}
+                    </Badge>
+                  </div>
+                  <Row label="Total da venda" value={formatMzn(detail.totalCents)} />
+                  <Row label="Pago inicialmente" value={formatMzn(detail.paidCents)} />
+                  <Row label="Regularizações" value={formatMzn(detail.settledCents - detail.paidCents)} />
+                  {detail.settlements.map((settlement) => (
+                    <Row
+                      key={settlement.id}
+                      label={`${formatDateTime(settlement.createdAt)} · ${PAYMENT_LABELS[settlement.method]}${settlement.userName ? ` · ${settlement.userName}` : ""}`}
+                      value={formatMzn(settlement.amountCents)}
+                    />
+                  ))}
+                  {detail.status === "completed" && detail.outstandingCents > 0 ? (
+                    <Button className="mt-3 w-full bg-emerald-600 text-white hover:bg-emerald-700" onClick={openSettleDialog}>
+                      <Wallet className="size-4" /> Regularizar pagamento
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
               {detail.note ? <Note>{detail.note}</Note> : null}
               {detail.status === "voided" ? (
                 <Note tone="danger">
@@ -297,6 +396,62 @@ export function SalesHistoryScreen() {
             </Button>
             <Button variant="destructive" onClick={() => void voidSale()} disabled={busy || reason.trim().length < 3}>
               {busy ? "A anular…" : "Confirmar anulação"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={settleOpen} onOpenChange={setSettleOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Regularizar pagamento</DialogTitle>
+            <DialogDescription>
+              Venda {detail?.receiptNumber} · falta {formatMzn(detail?.outstandingCents ?? 0)}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Field label="Valor a receber *" htmlFor="settleAmount" hint="Pode ser uma entrada parcial.">
+              <MoneyInput id="settleAmount" value={settleAmountInput} onValueChange={setSettleAmountInput} autoFocus />
+            </Field>
+            <Field label="Método de pagamento" htmlFor="settleMethod">
+              <Select
+                id="settleMethod"
+                value={settleMethod}
+                onChange={(event) => setSettleMethod(event.target.value as PaymentMethod)}
+              >
+                {(Object.keys(PAYMENT_LABELS) as PaymentMethod[]).map((key) => (
+                  <option key={key} value={key}>{PAYMENT_LABELS[key]}</option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Referência (opcional)" htmlFor="settleReference">
+              <Input
+                id="settleReference"
+                value={settleReference}
+                onChange={(event) => setSettleReference(event.target.value)}
+                placeholder="Ex.: ID da transacção"
+              />
+            </Field>
+            <Field label="Nota (opcional)" htmlFor="settleNote">
+              <Input
+                id="settleNote"
+                value={settleNote}
+                onChange={(event) => setSettleNote(event.target.value)}
+                placeholder="Ex.: pagamento na loja"
+              />
+            </Field>
+            {settleError ? <Note tone="danger">{settleError}</Note> : null}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSettleOpen(false)} disabled={busy}>
+              Cancelar
+            </Button>
+            <Button
+              className="bg-emerald-600 text-white hover:bg-emerald-700"
+              onClick={() => void settleSale()}
+              disabled={busy || parseMzn(settleAmountInput) <= 0}
+            >
+              {busy ? "A guardar…" : "Registar pagamento"}
             </Button>
           </DialogFooter>
         </DialogContent>

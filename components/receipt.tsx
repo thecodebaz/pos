@@ -92,11 +92,29 @@ export function ReceiptDialog({
           <div className="my-2 border-t border-dashed border-zinc-400" />
           {sale.payments.map((payment) => (
             <div key={payment.id} className="flex justify-between">
-              <span>{PAYMENT_LABELS[payment.method]}</span>
+              <span>{sale.isCredit ? `${PAYMENT_LABELS[payment.method]} (agora)` : PAYMENT_LABELS[payment.method]}</span>
               <span>{formatMzn(payment.amountCents)}</span>
             </div>
           ))}
           {sale.changeCents > 0 ? <Line label="Troco" value={formatMzn(sale.changeCents)} /> : null}
+          {sale.isCredit ? (
+            <>
+              <div className="my-2 border-t border-dashed border-zinc-400" />
+              <p className="font-bold uppercase">Venda a prazo</p>
+              <Line label="Pago até agora" value={formatMzn(sale.settledCents)} />
+              {sale.settlements.map((settlement) => (
+                <Line
+                  key={settlement.id}
+                  label={`${formatDateTime(settlement.createdAt)} · ${PAYMENT_LABELS[settlement.method]}`}
+                  value={formatMzn(settlement.amountCents)}
+                />
+              ))}
+              <Line
+                label={sale.status === "voided" ? "ANULADA" : sale.outstandingCents > 0 ? "FALTA PAGAR" : "LIQUIDADA"}
+                value={formatMzn(sale.outstandingCents)}
+              />
+            </>
+          ) : null}
           {sale.status === "voided" ? (
             <p className="mt-2 border border-zinc-900 py-1 text-center font-bold uppercase">Venda anulada</p>
           ) : null}

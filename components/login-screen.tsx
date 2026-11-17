@@ -100,6 +100,24 @@ export function LoginScreen() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selected, changing, submitPin]);
 
+  // Na lista de utilizadores, uma tecla (1-9) selecciona o utilizador com esse atalho.
+  useEffect(() => {
+    if (mode !== "users" || selected || changing || loadingUsers) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (!/^[1-9]$/.test(event.key)) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.isContentEditable || (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) return;
+      const user = users.find((candidate) => candidate.loginShortcut === Number(event.key));
+      if (!user) return;
+      event.preventDefault();
+      setSelected(user);
+      setPin("");
+      setError(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mode, selected, changing, loadingUsers, users]);
+
   if (boot !== "ready") return <BootScreen />;
 
   if (changing) {
@@ -144,7 +162,10 @@ export function LoginScreen() {
                 {initials(selected.displayName)}
               </div>
               <CardTitle>{selected.displayName}</CardTitle>
-              <CardDescription>{roleLabel(selected.role)}</CardDescription>
+              <CardDescription>
+                {roleLabel(selected.role)}
+                {selected.loginShortcut !== null ? ` · tecla ${selected.loginShortcut}` : ""}
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex justify-center gap-3" aria-label="PIN">
@@ -220,28 +241,40 @@ export function LoginScreen() {
                 Não existem utilizadores activos. Use um backup ou o código de recuperação do proprietário.
               </Note>
             ) : (
-              <div className="grid gap-2 sm:grid-cols-2">
-                {users.map((user) => (
-                  <button
-                    key={user.id}
-                    type="button"
-                    onClick={() => {
-                      setSelected(user);
-                      setPin("");
-                      setError(null);
-                    }}
-                    className="flex items-center gap-3 rounded-xl bg-card p-4 text-left ring-1 ring-foreground/10 transition-colors hover:ring-emerald-500"
-                  >
-                    <span className="flex size-11 items-center justify-center rounded-full bg-emerald-600/10 text-sm font-semibold text-emerald-700 dark:text-emerald-400">
-                      {initials(user.displayName)}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium">{user.displayName}</span>
-                      <span className="block text-xs text-muted-foreground">{roleLabel(user.role)}</span>
-                    </span>
-                    <LockKeyhole className="size-4 text-muted-foreground" />
-                  </button>
-                ))}
+              <div className="space-y-2">
+                {users.some((user) => user.loginShortcut !== null) ? (
+                  <p className="text-center text-xs text-muted-foreground">
+                    Prima a tecla do atalho para seleccionar o utilizador.
+                  </p>
+                ) : null}
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {users.map((user) => (
+                    <button
+                      key={user.id}
+                      type="button"
+                      onClick={() => {
+                        setSelected(user);
+                        setPin("");
+                        setError(null);
+                      }}
+                      className="flex items-center gap-3 rounded-xl bg-card p-4 text-left ring-1 ring-foreground/10 transition-colors hover:ring-emerald-500"
+                    >
+                      <span className="flex size-11 items-center justify-center rounded-full bg-emerald-600/10 text-sm font-semibold text-emerald-700 dark:text-emerald-400">
+                        {initials(user.displayName)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium">{user.displayName}</span>
+                        <span className="block text-xs text-muted-foreground">{roleLabel(user.role)}</span>
+                      </span>
+                      {user.loginShortcut !== null ? (
+                        <kbd className="rounded-md border bg-muted px-2 py-0.5 text-xs font-semibold">
+                          {user.loginShortcut}
+                        </kbd>
+                      ) : null}
+                      <LockKeyhole className="size-4 text-muted-foreground" />
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
             {error ? <Note tone="danger">{error}</Note> : null}

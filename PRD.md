@@ -377,6 +377,7 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-SET-07 | O ecrã de setup deixa de estar acessível depois de existir proprietário. | M |
 | RF-SET-08 | Existe opção de “repor aplicação” (apagar tudo), protegida por PIN de proprietário e backup obrigatório. | S |
 | RF-SET-09 | Dados de demonstração opcionais para formação. | C |
+| RF-SET-10 | Regra de aprovação de descontos configurável: nunca, acima do limite do caixa ou sempre (qualquer desconto exige gerente/proprietário). | M |
 
 ### 9.3 Autenticação, utilizadores e permissões
 
@@ -399,6 +400,7 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-AUTH-15 | Todos os eventos de login, falha, lockout, reset e alteração de PIN são auditados. | M |
 | RF-AUTH-16 | O utilizador pode consultar o seu perfil e terminar sessão. | S |
 | RF-AUTH-17 | O código de recuperação pode ser regenerado pelo proprietário. | S |
+| RF-AUTH-18 | Cada utilizador pode ter um atalho numérico (1-9) único, atribuído automaticamente ou pelo proprietário; premi-lo na lista selecciona o utilizador antes do PIN. | M |
 
 ### 9.4 Catálogo
 
@@ -439,6 +441,8 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-STK-11 | Stock negativo é mostrado com destaque no catálogo e no POS. | M |
 | RF-STK-12 | Entradas de compra podem ser registadas por pacote e convertidas para a unidade-base configurada no produto; o livro de movimentos e os saldos permanecem na unidade-base. | M |
 | RF-STK-13 | Importar Excel a partir da linha 6 (B SKU, C nome, E cor, J quantidade, K custo unitário, L valor), rever produtos novos/existentes, preços de venda em falta, conteúdo e preços do pacote/meia embalagem e taxa Rand→MZN; assinalar divergências entre K×J e L e exigir confirmação explícita; manter o stock em unidades-base e activar as formas de venda configuradas; confirmar produtos e movimentos de stock numa operação atómica. | M |
+| RF-STK-14 | O número da factura é editável na revisão (pré-preenchido da célula B2) e obrigatório. Facturas repetidas (comparação sem acentos, minúsculas e espaços normalizados) são rejeitadas antes e dentro da transação de importação; o registo da factura, o aumento de stock e os movimentos de compra ficam visíveis no histórico. Produtos existentes inactivos ou sem controlo de stock são reactivados e auditados na importação, sem bloquear a factura; produtos com unidade diferente da unidade-base continuam a bloquear. | M |
+| RF-STK-15 | Histórico de movimentos por produto com filtro temporal humanizado e intervalo personalizado no calendário, em hora de Maputo. | S |
 
 ### 9.6 Clientes
 
@@ -452,6 +456,7 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-CLI-06 | Histórico de compras do cliente. | S |
 | RF-CLI-07 | Aviso de possível duplicado por telefone, com opção de usar o existente. | S |
 | RF-CLI-08 | Eliminação lógica, preservando vendas. | M |
+| RF-CLI-09 | Saldo devedor de vendas a prazo visível no cartão do cliente, com contagem de vendas a prazo. | M |
 
 ### 9.7 Fornecedores
 
@@ -476,12 +481,12 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-VEN-07 | Finalização da venda é uma transação ACID única (venda + itens + pagamentos + stock + contador + auditoria). | M |
 | RF-VEN-08 | Número de recibo gerado por contador transacional, formato `{código}-{sequência}`. | M |
 | RF-VEN-09 | Anulação com motivo e aprovação de gerente/proprietário; repõe stock. | M |
-| RF-VEN-10 | Histórico com filtros por data, recibo, cliente, operador e estado; reimpressão. | M |
+| RF-VEN-10 | Histórico com pesquisa por recibo/cliente e filtro temporal humanizado (hoje, ontem, 7/30 dias, semana, mês, todo o período ou intervalo personalizado com calendário); reimpressão. | M |
 | RF-VEN-11 | Nota opcional na venda. | S |
 | RF-VEN-12 | Vendas em espera (held carts) no dispositivo. | S |
 | RF-VEN-13 | Item gratuito (100% desconto) exige aprovação. | S |
 | RF-VEN-14 | Devoluções e trocas parciais. | W |
-| RF-VEN-15 | Vendas a crédito (“fiado”). | W |
+| RF-VEN-15 | Vendas a prazo (“fiado”): cliente obrigatório (existente ou criado no próprio formulário com nome e contacto), valor inicial opcional (inclusive zero) e saldo devedor registado na conclusão da venda. | M |
 | RF-VEN-16 | Alteração manual de preço no POS. | W |
 | RF-VEN-17 | Recuperação de venda após crash: nunca fica venda sem itens/pagamentos nem stock sem baixa. | M |
 | RF-VEN-18 | Rascunho do carrinho sobrevive a recarregamento acidental, sem dados sensíveis. | S |
@@ -499,6 +504,8 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-PAG-05 | Troco calculado apenas sobre a linha de dinheiro. | M |
 | RF-PAG-06 | Nenhum dado de cartão (PAN, CVV, banda) é introduzido ou guardado. | M |
 | RF-PAG-07 | O recibo mostra o detalhe dos pagamentos e o troco. | M |
+| RF-PAG-08 | Em vendas a prazo, a soma dos pagamentos iniciais pode ser inferior ao total; o saldo fica pendente e as regularizações são gravadas numa tabela separada, sem inflacionar o mix de pagamentos. | M |
+| RF-PAG-09 | Fluxo de regularização no histórico: valor parcial ou total, método, referência e nota opcionais, com auditoria de cada entrada e actualização do saldo em dívida. | M |
 
 ### 9.10 Recibos
 
@@ -521,7 +528,9 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-REL-02 | Mix por método de pagamento. | M |
 | RF-REL-03 | Top produtos por quantidade e valor. | S |
 | RF-REL-04 | Stock baixo e esgotados. | M |
-| RF-REL-05 | Intervalo de datas (hoje, 7 dias, mês, personalizado). | S |
+| RF-REL-05 | Intervalo de datas humanizado (hoje, ontem, 7/30 dias, semana, mês, todo o período) com intervalo personalizado no calendário, em hora de Maputo. | S |
+| RF-REL-11 | Gráficos no relatório: evolução diária/semanal/mensal das vendas, meios de pagamento e produtos mais vendidos, mantendo as tabelas detalhadas. | S |
+| RF-REL-12 | Indicadores de vendas a prazo e crédito em aberto no período. | M |
 | RF-REL-06 | Total de IVA por período. | M |
 | RF-REL-07 | Vendas por operador. | S |
 | RF-REL-08 | Exportação CSV de vendas/stock. | C |
@@ -534,7 +543,7 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 |---|---|---|
 | RF-AUD-01 | Registo de auditoria local com ator, ação, entidade, antes/depois, timestamp e dispositivo. | M |
 | RF-AUD-02 | Auditar login/falha/lockout, vendas, anulações, descontos acima do limite, alterações de preço, stock, utilizadores, definições e backups. | M |
-| RF-AUD-03 | Ecrã de consulta com filtros por ator, ação e data. | S |
+| RF-AUD-03 | Ecrã de consulta com pesquisa por ator/ação/entidade e filtro temporal humanizado com calendário. | S |
 | RF-AUD-04 | Retenção mínima de 24 meses; exportação/arquivo. | S |
 | RF-AUD-05 | Nenhum PIN, hash ou salt é registado. | M |
 | RF-AUD-06 | A UI não permite editar/apagar eventos de auditoria. | M |
@@ -600,7 +609,7 @@ total_i        = base_i + tax_i
 ### 10.3 Descontos
 
 - O caixa pode aplicar até **5%** por venda (configurável).
-- Acima do limite, 100% de desconto ou desconto em valor acima do limite: exige PIN de gerente/proprietário.
+- A aprovação é configurável em `Definições`: `never` (nunca exige), `above_limit` (acima do limite do caixa) ou `always` (qualquer desconto exige PIN de gerente/proprietário).
 - O desconto é registado com requerente, aprovador, valor, motivo (opcional) e timestamp.
 - O proprietário pode autoaprovar; gerente não pode aprovar a própria ação.
 - Não há cupões nem descontos automáticos no MVP.
@@ -686,7 +695,7 @@ total_i        = base_i + tax_i
 |---|---|---|---|
 | Vender, consultar catálogo, criar cliente | Sim | Sim | Sim |
 | Desconto até ao limite | Sim | Sim | Sim |
-| Desconto acima do limite / item gratuito | Sim | Sim | Não (requer aprovação) |
+| Desconto acima do limite / item gratuito | Sim | Sim | Conforme regra configurável em Definições |
 | Anular venda | Sim | Sim | Não (requer aprovação) |
 | Criar/editar produtos e categorias | Sim | Sim | Não |
 | Alterar preço/custo | Sim | Sim | Não |
@@ -1016,9 +1025,9 @@ public/
 | Tabela | Campos principais | Notas |
 |---|---|---|
 | `app_meta` | `key TEXT PK`, `value TEXT` | `installation_id`, `created_at`, `last_backup_at`, `storage_persisted` |
-| `users` | `id`, `username UNIQUE`, `display_name`, `role`, `active`, `pin_hash`, `pin_salt`, `pin_iterations`, `pin_algo`, `failed_attempts`, `locked_until`, `must_change_pin`, `last_login_at`, `created_at`, `updated_at` | `role IN ('owner','manager','cashier')` |
+| `users` | `id`, `username UNIQUE`, `display_name`, `role`, `active`, `pin_hash`, `pin_salt`, `pin_iterations`, `pin_algo`, `failed_attempts`, `locked_until`, `must_change_pin`, `last_login_at`, `login_shortcut`, `created_at`, `updated_at` | `role IN ('owner','manager','cashier')`; `login_shortcut BETWEEN 1 AND 9`, único quando preenchido |
 | `recovery_codes` | `id`, `user_id`, `hash`, `salt`, `iterations`, `created_at`, `used_at`, `rotated_at` | Apenas para o proprietário |
-| `settings` | `id TEXT PK CHECK(id='default')`, `store_name`, `nif`, `address`, `phone`, `currency`, `tax_rate_bp`, `receipt_footer`, `installation_code`, `allow_negative_stock`, `max_cashier_discount_bp`, `idle_lock_seconds`, `created_at`, `updated_at` | Uma linha |
+| `settings` | `id TEXT PK CHECK(id='default')`, `store_name`, `nif`, `address`, `phone`, `currency`, `tax_rate_bp`, `receipt_footer`, `installation_code`, `allow_negative_stock`, `max_cashier_discount_bp`, `discount_approval_mode`, `idle_lock_seconds`, `created_at`, `updated_at` | Uma linha; `discount_approval_mode IN ('never','above_limit','always')` |
 | `categories` | `id`, `name`, `sort_order`, `created_at`, `updated_at`, `deleted_at` |  |
 | `products` | `id`, `sku`, `name`, `color`, `search_text`, `category_id`, `unit`, `price_cents`, `package_qty_milli`, `package_price_cents`, `half_package_price_cents`, `sell_by_unit`, `sell_by_package`, `sell_by_half_package`, `cost_cents`, `tax_rate_bp`, `track_stock`, `stock_on_hand_milli`, `low_stock_threshold_milli`, `active`, `created_at`, `updated_at`, `deleted_at` | Variantes activas únicas por SKU/nome/cor; stock e custo na unidade-base |
 | `product_barcodes` | `id`, `product_id`, `barcode UNIQUE`, `is_primary` | Vários por produto |

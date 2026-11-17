@@ -6,6 +6,7 @@ import type {
   BackupInfo,
   Category,
   Customer,
+  PaymentMethod,
   Product,
   Quote,
   QuoteInput,
@@ -178,12 +179,15 @@ class DbClient {
 
   createUser(
     token: string,
-    payload: { username: string; displayName: string; role: string; pin: string },
+    payload: { username: string; displayName: string; role: string; pin: string; loginShortcut?: number | null },
   ): Promise<UserPublic> {
     return this.request("user.create", payload, token, 120_000);
   }
 
-  updateUser(token: string, payload: { id: string; displayName?: string; role?: string; active?: boolean }): Promise<UserPublic> {
+  updateUser(
+    token: string,
+    payload: { id: string; displayName?: string; role?: string; active?: boolean; loginShortcut?: number | null },
+  ): Promise<UserPublic> {
     return this.request("user.update", payload, token);
   }
 
@@ -286,6 +290,19 @@ class DbClient {
 
   voidSale(token: string, id: string, reason: string, approvalToken?: string | null): Promise<Sale> {
     return this.request<Sale>("sale.void", { id, reason, approvalToken }, token, 120_000);
+  }
+
+  settleSale(
+    token: string,
+    payload: {
+      id: string;
+      amountCents: number;
+      method: PaymentMethod;
+      reference?: string | null;
+      note?: string | null;
+    },
+  ): Promise<Sale> {
+    return this.request<Sale>("sale.settle", payload, token, 120_000);
   }
 
   // ---- Relatórios / auditoria / backup -----------------------------------

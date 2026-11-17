@@ -6,8 +6,10 @@ import { ArrowDownUp, Boxes, FileSpreadsheet, Plus, Search } from "lucide-react"
 import { useApp, errorMessage } from "@/lib/app-context";
 import type { PagedResult, Product, StockEntryUnit, StockMovement, Supplier } from "@/lib/db/protocol";
 import { parseStockImportWorkbook, STOCK_IMPORT_DRAFT_KEY } from "@/lib/stock-import";
-import { formatDateTime, formatMzn, formatMznPlain, formatQty, parseMzn, parseQty } from "@/lib/format";
+import { formatDateTime, formatMzn, formatMznPlain, formatQty, maputoDayFromInput, parseMzn, parseQty } from "@/lib/format";
+import { getDateRangePreset, type DateRange } from "@/lib/date-range";
 import { Badge, EmptyState, Field, LoadingPanel, MoneyInput, Note, PageHeader, Select } from "@/components/shared";
+import { DateRangeFilter } from "@/components/date-range-filter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PaginationControls } from "@/components/pagination-controls";
@@ -39,6 +41,7 @@ export function StockScreen() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [productPage, setProductPage] = useState(1);
   const [historyPage, setHistoryPage] = useState(1);
+  const [historyRange, setHistoryRange] = useState<DateRange>(() => getDateRangePreset("all"));
   const [loading, setLoading] = useState(true);
   const [importingFile, setImportingFile] = useState(false);
   const [query, setQuery] = useState("");
@@ -111,6 +114,8 @@ export function StockScreen() {
         productId,
         page: requestedPage,
         pageSize: HISTORY_PAGE_SIZE,
+        from: maputoDayFromInput(historyRange.from),
+        to: maputoDayFromInput(historyRange.to, true),
       });
       setHistory(result.items);
       setHistoryTotal(result.total);
@@ -120,7 +125,7 @@ export function StockScreen() {
     } finally {
       setHistoryLoading(false);
     }
-  }, [call, toast]);
+  }, [call, historyRange.from, historyRange.to, toast]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadHistory(selectedId, historyPage), 0);
@@ -248,7 +253,7 @@ export function StockScreen() {
       ) : null}
 
       <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
-        <div className="rounded-xl bg-card ring-1 ring-foreground/10">
+        <div className="rounded-xl bg-card ring-1 ring-foreground/10 lg:sticky lg:top-4 lg:self-start">
           <p className="border-b px-3 py-2 text-sm font-medium">Produtos ({productTotal})</p>
           <div className="max-h-[60vh] overflow-y-auto p-1">
             {products.length === 0 ? (
@@ -305,17 +310,25 @@ export function StockScreen() {
               </div>
 
               <div className="rounded-xl bg-card ring-1 ring-foreground/10 lg:col-span-3">
-                <p className="border-b px-3 py-2 text-sm font-medium">Movimentos recentes</p>
+                <div className="flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-sm font-medium">Movimentos recentes</p>
+                  <DateRangeFilter
+                    value={historyRange}
+                    onChange={(next) => { setHistoryRange(next); setHistoryPage(1); }}
+                    className="sm:w-56"
+                  />
+                </div>
                 {historyLoading ? (
                   <LoadingPanel label="A carregar movimentos…" />
                 ) : historyTotal === 0 ? (
-                  <EmptyState title="Sem movimentos" description="Registe uma entrada de stock para começar." />
+                  <EmptyState title="Sem movimentos" description="Ajuste o período ou registe uma entrada de stock para começar." />
                 ) : (
                   <Table>
                     <TableHeader>
                       <TableRow>
                         <TableHead>Data</TableHead>
                         <TableHead>Tipo</TableHead>
+                        <TableHead>Factura</TableHead>
                         <TableHead className="text-right">Qtd</TableHead>
                         <TableHead className="text-right">Saldo</TableHead>
                         <TableHead>Detalhe</TableHead>
@@ -330,13 +343,18 @@ export function StockScreen() {
                               {MOVEMENT_LABELS[movement.type] ?? movement.type}
                             </Badge>
                           </TableCell>
+                          <TableCell>
+                            {movement.documentRef
+                              ? <Badge tone="info">{movement.documentRef}</Badge>
+                              : <span className="text-xs text-muted-foreground">—</span>}
+                          </TableCell>
                           <TableCell className={"text-right tabular-nums " + (movement.qtyMilli < 0 ? "text-red-600" : "")}>
                             {movement.qtyMilli > 0 ? "+" : ""}
                             {formatQty(movement.qtyMilli)}
                           </TableCell>
                           <TableCell className="text-right tabular-nums">{formatQty(movement.balanceAfterMilli)}</TableCell>
                           <TableCell className="text-xs text-muted-foreground">
-                            {[movement.supplierName, movement.documentRef, movement.reason, movement.userName].filter(Boolean).join(" · ") || "—"}
+                            {[movement.supplierName, movement.reason, movement.userName].filter(Boolean).join(" · ") || "—"}
                           </TableCell>
                         </TableRow>
                       ))}

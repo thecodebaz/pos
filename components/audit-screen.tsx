@@ -4,8 +4,10 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, RefreshCw, Search } from "lucide-react";
 import { useApp, errorMessage } from "@/lib/app-context";
 import type { AuditEntry, PagedResult } from "@/lib/db/protocol";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, maputoDayFromInput } from "@/lib/format";
+import { getDateRangePreset, type DateRange } from "@/lib/date-range";
 import { Badge, EmptyState, Field, LoadingPanel, Note, PageHeader, Select } from "@/components/shared";
+import { DateRangeFilter } from "@/components/date-range-filter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PaginationControls } from "@/components/pagination-controls";
@@ -40,6 +42,8 @@ const ACTION_LABELS: Record<string, string> = {
   "supplier.updated": "Fornecedor actualizado",
   "supplier.deleted": "Fornecedor eliminado",
   "sale.completed": "Venda concluída",
+  "sale.credit": "Venda a prazo registada",
+  "sale.settlement": "Pagamento de venda a prazo regularizado",
   "sale.voided": "Venda anulada",
   "backup.exported": "Backup exportado",
   "backup.imported": "Backup importado",
@@ -52,8 +56,8 @@ function actionLabel(action: string) {
 function actionTone(action: string): "neutral" | "success" | "warning" | "danger" | "info" {
   if (action.endsWith("_failed") || action.includes("voided") || action.includes("deleted")) return "danger";
   if (action.includes("recovery") || action.includes("imported")) return "warning";
-  if (action.includes("created") || action.includes("completed")) return "success";
-  if (action.startsWith("stock.") || action.startsWith("auth.") || action.startsWith("approval.")) return "info";
+  if (action.includes("created") || action.includes("completed") || action === "sale.settlement") return "success";
+  if (action.startsWith("stock.") || action.startsWith("auth.") || action.startsWith("approval.") || action === "sale.credit") return "info";
   return "neutral";
 }
 
@@ -74,6 +78,7 @@ export function AuditScreen() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState(String(DEFAULT_PAGE_SIZE));
   const [query, setQuery] = useState("");
+  const [range, setRange] = useState<DateRange>(() => getDateRangePreset("all"));
   const [page, setPage] = useState(1);
 
   const actionMatches = useMemo(() => {
@@ -92,6 +97,8 @@ export function AuditScreen() {
         pageSize: Number(pageSize),
         query,
         actionMatches,
+        from: maputoDayFromInput(range.from),
+        to: maputoDayFromInput(range.to, true),
       });
       setEntries(result.items);
       setTotal(result.total);
@@ -101,7 +108,7 @@ export function AuditScreen() {
     } finally {
       setLoading(false);
     }
-  }, [actionMatches, call, page, pageSize, query, toast]);
+  }, [actionMatches, call, page, pageSize, query, range.from, range.to, toast]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), query ? 200 : 0);
@@ -123,7 +130,13 @@ export function AuditScreen() {
         }
       />
 
-      <div className="mb-3 grid gap-2 sm:grid-cols-[1fr_10rem]">
+      <div className="mb-3 grid gap-2 md:grid-cols-[minmax(0,16rem)_minmax(0,1fr)_10rem]">
+        <Field label="Período">
+          <DateRangeFilter
+            value={range}
+            onChange={(next) => { setRange(next); setPage(1); }}
+          />
+        </Field>
         <Field label="Pesquisar" htmlFor="auditSearch">
           <div className="relative">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />

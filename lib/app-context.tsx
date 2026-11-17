@@ -64,6 +64,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const sessionRef = useRef<SessionInfo | null>(null);
   const lastActivityRef = useRef(0);
+  const lastWorkerActivityRef = useRef(0);
   const waitingWorkerRef = useRef<ServiceWorker | null>(null);
   const registrationRef = useRef<ServiceWorkerRegistration | null>(null);
   const applyingUpdateRef = useRef(false);
@@ -177,8 +178,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const touch = useCallback(() => {
-    lastActivityRef.current = Date.now();
-  }, []);
+    const now = Date.now();
+    lastActivityRef.current = now;
+    const current = sessionRef.current;
+    if (!current || now - lastWorkerActivityRef.current < 20_000) return;
+
+    lastWorkerActivityRef.current = now;
+    void db.request("auth.touch", {}, current.token).catch((error: unknown) => {
+      if (error instanceof ApiError && (error.code === "UNAUTHENTICATED" || error.code === "SESSION_LOCKED")) {
+        sessionRef.current = null;
+        setSession(null);
+        toast("Sessão bloqueada por inactividade.", "info");
+        return;
+      }
+      toast(errorMessage(error), "error");
+    });
+  }, [toast]);
 
   useEffect(() => {
     if (!session) return;
@@ -209,7 +224,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [session, toast, touch]);
 
   const enterSession = useCallback((next: SessionInfo) => {
-    lastActivityRef.current = Date.now();
+    const now = Date.now();
+    lastActivityRef.current = now;
+    lastWorkerActivityRef.current = now;
     sessionRef.current = next;
     setSession(next);
   }, []);

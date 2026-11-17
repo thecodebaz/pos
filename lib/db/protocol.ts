@@ -53,6 +53,8 @@ export interface UserPublic {
   active: boolean;
   mustChangePin: boolean;
   lastLoginAt: string | null;
+  /** Tecla (1-9) que selecciona este utilizador no ecrã de entrada. */
+  loginShortcut: number | null;
 }
 
 export interface Settings {
@@ -66,6 +68,8 @@ export interface Settings {
   installationCode: string;
   allowNegativeStock: boolean;
   maxCashierDiscountBp: number;
+  /** Regra de aprovação por outro utilizador quando há desconto. */
+  discountApprovalMode: "never" | "above_limit" | "always";
   idleLockSeconds: number;
 }
 
@@ -139,6 +143,22 @@ export interface StockImportMatch {
   sellByHalfPackage: boolean;
 }
 
+/** Resultado da verificação de duplicados antes de confirmar uma importação. */
+export interface StockImportDocumentCheck {
+  exists: boolean;
+  documentRef: string | null;
+  createdAt: string | null;
+}
+
+/** Resumo do aumento de stock registrado por uma importação. */
+export interface StockImportCommitResult {
+  documentRef: string;
+  productCount: number;
+  createdCount: number;
+  quantityMilli: number;
+  totalCostCents: number;
+}
+
 export interface PagedResult<T> {
   items: T[];
   page: number;
@@ -173,6 +193,9 @@ export interface Customer {
   email: string;
   address: string;
   notes: string;
+  /** Soma das vendas a prazo ainda por regularizar. */
+  creditBalanceCents: number;
+  creditSaleCount: number;
 }
 
 export interface Supplier {
@@ -243,7 +266,19 @@ export interface SaleInput extends QuoteInput {
   customerId: string | null;
   note: string;
   payments: PaymentInput[];
+  /** Venda a prazo: o valor de `payments` pode ser parcial ou zero. */
+  isCredit?: boolean;
   approvalToken?: string | null;
+}
+
+export interface SaleSettlement {
+  id: string;
+  amountCents: number;
+  method: PaymentMethod;
+  reference: string | null;
+  note: string | null;
+  userName: string | null;
+  createdAt: string;
 }
 
 export interface SaleItem {
@@ -287,6 +322,12 @@ export interface Sale {
   totalCents: number;
   paidCents: number;
   changeCents: number;
+  isCredit: boolean;
+  /** Total recebido até agora: pagamento inicial + regularizações. */
+  settledCents: number;
+  /** Valor ainda em dívida (apenas vendas a prazo concluídas). */
+  outstandingCents: number;
+  settlements: SaleSettlement[];
   note: string | null;
   createdAt: string;
   voidedAt: string | null;
@@ -302,6 +343,8 @@ export interface SaleSummary {
   cashierName: string;
   customerName: string | null;
   totalCents: number;
+  isCredit: boolean;
+  outstandingCents: number;
   createdAt: string;
   itemCount: number;
 }
@@ -315,8 +358,12 @@ export interface ReportSummary {
   taxCents: number;
   totalCents: number;
   averageCents: number;
+  creditSalesCount: number;
+  creditTotalCents: number;
+  creditOutstandingCents: number;
   byMethod: { method: PaymentMethod; amountCents: number; count: number }[];
   topProducts: { name: string; qtyMilli: number; totalCents: number }[];
+  dailySales: { date: string; totalCents: number; count: number }[];
   lowStock: Product[];
 }
 
@@ -345,6 +392,7 @@ export type RequestType =
   | "auth.login"
   | "auth.logout"
   | "auth.lock"
+  | "auth.touch"
   | "auth.recoverOwner"
   | "auth.changePin"
   | "approval.request"
@@ -366,6 +414,7 @@ export type RequestType =
   | "stock.history.page"
   | "stock.low"
   | "stock.import.preview"
+  | "stock.import.check"
   | "stock.import.commit"
   | "customer.list"
   | "customer.page"
@@ -381,6 +430,7 @@ export type RequestType =
   | "sale.page"
   | "sale.get"
   | "sale.void"
+  | "sale.settle"
   | "report.summary"
   | "audit.list"
   | "audit.page"
