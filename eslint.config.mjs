@@ -22,6 +22,13 @@ const eslintConfig = defineConfig([
       "@typescript-eslint/no-explicit-any": "off",
     },
   },
+  {
+    // O processo principal do Electron e o arrancador dev são CommonJS.
+    files: ["electron/**/*.cjs", "scripts/electron-dev.cjs"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;

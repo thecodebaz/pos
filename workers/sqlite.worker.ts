@@ -17,6 +17,9 @@ import type {
   CartItemInput,
   Category,
   Customer,
+  Expense,
+  ExpenseCategory,
+  ExpensePageResult,
   PaymentInput,
   PaymentMethod,
   PagedResult,
@@ -47,7 +50,12 @@ import type {
   WorkerRequest,
 } from "../lib/db/protocol";
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
+// Espelho de EXPENSE_CATEGORIES em lib/db/protocol.ts. O worker é um script
+// isolado e não pode importar módulos da aplicação em tempo de execução.
+const EXPENSE_CATEGORIES: readonly string[] = [
+  "compras", "transporte", "utilidades", "salarios", "aluguer", "manutencao", "impostos", "marketing", "outros",
+];
 const PIN_ITERATIONS = 600_000;
 const MAX_IMPORT_BYTES = 512 * 1024 * 1024;
 const AUTO_BACKUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -81,6 +89,21 @@ function uuid(): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+const MAPUTO_OFFSET_MS = 2 * 60 * 60 * 1000;
+
+/** Segunda-feira até hoje (ISO, hora de Maputo). Usado quando a UI não envia datas. */
+function thisWeekRange(): { from: string; to: string } {
+  const local = new Date(Date.now() + MAPUTO_OFFSET_MS);
+  const year = local.getUTCFullYear();
+  const month = local.getUTCMonth();
+  const day = local.getUTCDate();
+  const mondayOffset = (local.getUTCDay() + 6) % 7;
+  return {
+    from: new Date(Date.UTC(year, month, day - mondayOffset) - MAPUTO_OFFSET_MS).toISOString(),
+    to: new Date(Date.UTC(year, month, day + 1) - MAPUTO_OFFSET_MS).toISOString(),
+  };
 }
 
 function toBool(value: unknown): boolean {
@@ -332,6 +355,86 @@ function requireSession(roles?: Role[]): NonNullable<typeof session> {
   if (roles && !roles.includes(session.role)) fail("FORBIDDEN", "Não tem permissão para esta operação.");
   session.lastActivity = Date.now();
   return session;
+}
+
+const EXPENSE_SELECT = `SELECT e.*, u.display_name AS user_name FROM expenses e LEFT JOIN users u ON u.id = e.user_id`;
+
+function toExpense(row: Row): Expense {
+  return {
+    id: String(row.id),
+    category: String(row.category) as ExpenseCategory,
+    description: String(row.description),
+    amountCents: Number(row.amount_cents),
+    method: String(row.method) as PaymentMethod,
+    reference: row.reference ? String(row.reference) : null,
+    note: row.note ? String(row.note) : null,
+    spentAt: String(row.spent_at),
+    createdAt: String(row.created_at),
+    userName: row.user_name ? String(row.user_name) : null,
+  };
+}
+
+function expenseValues(payload: Row, before: Row | null) {
+  const category = String(payload.category ?? before?.category ?? "");
+  if (!(EXPENSE_CATEGORIES as readonly string[]).includes(category)) {
+    fail("VALIDATION", "Escolha uma categoria válida para a saída.");
+  }
+  const description = String(payload.description ?? before?.description ?? "").trim();
+  if (!description) fail("VALIDATION", "Indique a descrição da saída.");
+  const amountCents = Math.trunc(Number(payload.amountCents ?? before?.amount_cents ?? 0));
+  if (!Number.isSafeInteger(amountCents) || amountCents <= 0) fail("VALIDATION", "Indique um valor superior a zero.");
+  const method = String(payload.method ?? before?.method ?? "cash") as PaymentMethod;
+  if (!PAYMENT_METHODS.includes(method)) fail("PAYMENT_INVALID", "Método de pagamento inválido.");
+  const reference = String(payload.reference ?? before?.reference ?? "").trim() || null;
+  const note = String(payload.note ?? before?.note ?? "").trim() || null;
+  const rawSpentAt = payload.spentAt ?? before?.spent_at;
+  const parsedSpentAt = rawSpentAt ? new Date(String(rawSpentAt)) : null;
+  if (!parsedSpentAt || Number.isNaN(parsedSpentAt.getTime())) fail("VALIDATION", "Indique a data da saída.");
+  return {
+    category,
+    description,
+    searchText: norm(`${description} ${reference ?? ""} ${note ?? ""}`),
+    amountCents,
+    method,
+    reference,
+    note,
+    spentAt: parsedSpentAt.toISOString(),
+  };
+}
+
+function upsertExpense(payload: Row): Expense {
+  const current = requireSession(["owner", "manager"]);
+  const id = payload.id ? String(payload.id) : uuid();
+  const before = payload.id ? one(`${EXPENSE_SELECT} WHERE e.id = ? AND e.deleted_at IS NULL`, [id]) : null;
+  if (payload.id && !before) fail("NOT_FOUND", "Saída de dinheiro não encontrada.");
+  const values = expenseValues(payload, before);
+  const now = nowIso();
+  if (before) {
+    run(
+      `UPDATE expenses SET category = ?, description = ?, search_text = ?, amount_cents = ?, method = ?, reference = ?, note = ?, spent_at = ?, updated_at = ? WHERE id = ?`,
+      [values.category, values.description, values.searchText, values.amountCents, values.method, values.reference, values.note, values.spentAt, now, id],
+    );
+  } else {
+    run(
+      `INSERT INTO expenses (id, category, description, search_text, amount_cents, method, reference, note, spent_at, user_id, created_at, updated_at, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      [id, values.category, values.description, values.searchText, values.amountCents, values.method, values.reference, values.note, values.spentAt, current.userId, now, now],
+    );
+  }
+  const after = one(`${EXPENSE_SELECT} WHERE e.id = ?`, [id])!;
+  audit(before ? "expense.updated" : "expense.created", "expense", id, before ? toExpense(before) : null, toExpense(after));
+  return toExpense(after);
+}
+
+function deleteExpense(payload: Row): { id: string } {
+  requireSession(["owner", "manager"]);
+  const id = String(payload.id ?? "");
+  const before = one(`${EXPENSE_SELECT} WHERE e.id = ? AND e.deleted_at IS NULL`, [id]);
+  if (!before) fail("NOT_FOUND", "Saída de dinheiro não encontrada.");
+  const now = nowIso();
+  run("UPDATE expenses SET deleted_at = ?, updated_at = ? WHERE id = ?", [now, now, id]);
+  audit("expense.deleted", "expense", id, toExpense(before), null);
+  return { id };
 }
 
 function toProduct(row: Row): Product {
@@ -1316,6 +1419,23 @@ CREATE TABLE IF NOT EXISTS sale_settlements (
   created_at TEXT NOT NULL
 );
 
+-- Saídas de dinheiro (despesas ou qualquer outra finalidade). Não alteram stock.
+CREATE TABLE IF NOT EXISTS expenses (
+  id TEXT PRIMARY KEY,
+  category TEXT NOT NULL CHECK (category IN ('compras','transporte','utilidades','salarios','aluguer','manutencao','impostos','marketing','outros')),
+  description TEXT NOT NULL,
+  search_text TEXT NOT NULL DEFAULT '',
+  amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+  method TEXT NOT NULL CHECK (method IN ('cash','card','pos','mpesa','emola','transfer','other')),
+  reference TEXT,
+  note TEXT,
+  spent_at TEXT NOT NULL,
+  user_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY,
   action TEXT NOT NULL,
@@ -1388,6 +1508,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(expires_at, used_at);
 CREATE INDEX IF NOT EXISTS idx_sale_settlements_sale ON sale_settlements(sale_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_sales_credit ON sales(is_credit, status, customer_id);
+CREATE INDEX IF NOT EXISTS idx_expenses_spent ON expenses(spent_at);
+CREATE INDEX IF NOT EXISTS idx_expenses_search ON expenses(search_text);
 `;
 
 async function migrate(): Promise<void> {
@@ -1642,6 +1764,39 @@ async function migrate(): Promise<void> {
         PRAGMA user_version = 8;
       `);
       run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)", [8, nowIso()]);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  if (Number(one("PRAGMA user_version")?.user_version ?? 0) === 8) {
+    const backup = (sqlite3.capi.sqlite3_js_db_export(db.pointer) as Uint8Array).slice();
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "");
+    await writeBackupFile(`pre-migrate-v8-${stamp}.db`, backup);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS expenses (
+          id TEXT PRIMARY KEY,
+          category TEXT NOT NULL CHECK (category IN ('compras','transporte','utilidades','salarios','aluguer','manutencao','impostos','marketing','outros')),
+          description TEXT NOT NULL,
+          search_text TEXT NOT NULL DEFAULT '',
+          amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+          method TEXT NOT NULL CHECK (method IN ('cash','card','pos','mpesa','emola','transfer','other')),
+          reference TEXT,
+          note TEXT,
+          spent_at TEXT NOT NULL,
+          user_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          deleted_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_expenses_spent ON expenses(spent_at);
+        CREATE INDEX IF NOT EXISTS idx_expenses_search ON expenses(search_text);
+        PRAGMA user_version = 9;
+      `);
+      run("INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)", [9, nowIso()]);
       db.exec("COMMIT");
     } catch (error) {
       db.exec("ROLLBACK");
@@ -2294,6 +2449,7 @@ async function purgeOperationalData(payload: Record<string, unknown>): Promise<{
     run("DELETE FROM product_barcodes");
     run("DELETE FROM stock_movements");
     run("DELETE FROM sale_settlements");
+    run("DELETE FROM expenses");
     run("DELETE FROM sale_payments");
     run("DELETE FROM sale_items");
     run("DELETE FROM sales");
@@ -3170,8 +3326,9 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
       return { data: await settleSale(payload) };
     case "report.summary": {
       requireSession(["owner", "manager", "cashier"]);
-      const from = String(payload.from ?? new Date(new Date().setHours(0, 0, 0, 0)).toISOString());
-      const to = String(payload.to ?? new Date(new Date().setHours(24, 0, 0, 0)).toISOString());
+      const fallbackRange = thisWeekRange();
+      const from = String(payload.from ?? fallbackRange.from);
+      const to = String(payload.to ?? fallbackRange.to);
       const totals = one(
         `SELECT COUNT(*) AS c, COALESCE(SUM(subtotal_cents),0) AS subtotal, COALESCE(SUM(discount_cents),0) AS discount, COALESCE(SUM(tax_cents),0) AS tax, COALESCE(SUM(total_cents),0) AS total
          FROM sales WHERE status = 'completed' AND created_at >= ? AND created_at < ?`,
@@ -3183,6 +3340,23 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
         `SELECT sp.method, COALESCE(SUM(sp.amount_cents),0) AS amount, COUNT(*) AS c FROM sale_payments sp JOIN sales s ON s.id = sp.sale_id WHERE s.status = 'completed' AND s.created_at >= ? AND s.created_at < ? GROUP BY sp.method`,
         [from, to],
       ).map((row) => ({ method: String(row.method) as PaymentMethod, amountCents: Number(row.amount), count: Number(row.c) }));
+      const expenseTotals = one(
+        `SELECT COUNT(*) AS c, COALESCE(SUM(amount_cents),0) AS total FROM expenses WHERE deleted_at IS NULL AND spent_at >= ? AND spent_at < ?`,
+        [from, to],
+      );
+      const expensesByCategory = rows(
+        `SELECT category, COALESCE(SUM(amount_cents),0) AS amount, COUNT(*) AS c
+         FROM expenses WHERE deleted_at IS NULL AND spent_at >= ? AND spent_at < ?
+         GROUP BY category ORDER BY amount DESC`,
+        [from, to],
+      ).map((row) => ({ category: String(row.category) as ExpenseCategory, amountCents: Number(row.amount), count: Number(row.c) }));
+      const dailyExpenses = rows(
+        `SELECT strftime('%Y-%m-%d', datetime(spent_at, '+2 hours')) AS day, COUNT(*) AS c, COALESCE(SUM(amount_cents), 0) AS total
+         FROM expenses WHERE deleted_at IS NULL AND spent_at >= ? AND spent_at < ?
+         GROUP BY day ORDER BY day`,
+        [from, to],
+      ).map((row) => ({ date: String(row.day), totalCents: Number(row.total), count: Number(row.c) }));
+      const expenseTotal = Number(expenseTotals?.total ?? 0);
       const topProducts = rows(
         `SELECT si.name_snapshot AS name, SUM(si.qty_milli) AS qty, SUM(si.total_cents) AS total FROM sale_items si JOIN sales s ON s.id = si.sale_id WHERE s.status = 'completed' AND s.created_at >= ? AND s.created_at < ? GROUP BY si.product_id, si.name_snapshot ORDER BY total DESC LIMIT 10`,
         [from, to],
@@ -3214,12 +3388,55 @@ async function handleRequest(req: WorkerRequest): Promise<{ data: unknown; trans
           totalCents: total,
           averageCents: count > 0 ? Math.round(total / count) : 0,
           byMethod,
+          expenseCount: Number(expenseTotals?.c ?? 0),
+          expenseTotalCents: expenseTotal,
+          netResultCents: total - expenseTotal,
+          expensesByCategory,
+          dailyExpenses,
           topProducts,
           dailySales,
           lowStock: lowStockProducts(),
         } as ReportSummary,
       };
     }
+    case "expense.page": {
+      requireSession();
+      const bind: unknown[] = [];
+      let where = "WHERE e.deleted_at IS NULL";
+      if (payload.from) {
+        where += " AND e.spent_at >= ?";
+        bind.push(String(payload.from));
+      }
+      if (payload.to) {
+        where += " AND e.spent_at < ?";
+        bind.push(String(payload.to));
+      }
+      const category = payload.category ? String(payload.category) : null;
+      if (category && (EXPENSE_CATEGORIES as readonly string[]).includes(category)) {
+        where += " AND e.category = ?";
+        bind.push(category);
+      }
+      const query = norm(payload.query);
+      for (const term of query.split(/\s+/).filter(Boolean)) {
+        where += " AND e.search_text LIKE ?";
+        bind.push(`%${term}%`);
+      }
+      const totals = one(`SELECT COUNT(*) AS c, COALESCE(SUM(e.amount_cents),0) AS total FROM expenses e ${where}`, bind);
+      const total = Number(totals?.c ?? 0);
+      const { page, pageSize } = paginationInput(payload);
+      const current = resolvePage(page, pageSize, total);
+      const items = rows(
+        `${EXPENSE_SELECT} ${where} ORDER BY e.spent_at DESC, e.created_at DESC LIMIT ? OFFSET ?`,
+        [...bind, pageSize, (current - 1) * pageSize],
+      ).map(toExpense);
+      return {
+        data: { items, page: current, pageSize, total, totalCents: Number(totals?.total ?? 0) } as ExpensePageResult,
+      };
+    }
+    case "expense.upsert":
+      return { data: upsertExpense(payload) };
+    case "expense.delete":
+      return { data: deleteExpense(payload) };
     case "audit.list": {
       requireSession(["owner", "manager"]);
       const limit = Math.min(500, Math.max(1, Math.trunc(Number(payload.limit ?? 200))));

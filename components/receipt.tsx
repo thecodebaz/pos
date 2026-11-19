@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { Printer, X } from "lucide-react";
 import type { Sale, Settings } from "@/lib/db/protocol";
 import { PAYMENT_LABELS } from "@/lib/db/protocol";
@@ -17,11 +19,38 @@ export function ReceiptDialog({
   open: boolean;
   onClose: () => void;
 }) {
-  if (!open || !sale) return null;
+  useEffect(() => {
+    if (!open || !sale) return;
+    // Sinaliza ao CSS de impressão que só o recibo deve ocupar o layout.
+    document.body.classList.add("printing-receipt");
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "p") {
+        event.preventDefault();
+        window.print();
+        return;
+      }
+      if (event.key === "F10") {
+        event.preventDefault();
+        window.print();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.classList.remove("printing-receipt");
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open, sale, onClose]);
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 print:static print:block print:bg-transparent print:p-0">
-      <div className="my-4 w-full max-w-sm rounded-xl bg-white p-5 text-zinc-900 shadow-xl print:my-0 print:max-w-none print:rounded-none print:shadow-none">
+  if (!open || !sale || typeof document === "undefined") return null;
+
+  return createPortal(
+    <div className="receipt-print-root fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 print:static print:block print:bg-transparent print:p-0">
+      <div className="my-4 w-full max-w-sm rounded-xl bg-white p-5 text-zinc-900 shadow-xl print:my-0 print:max-w-none print:rounded-none print:p-0 print:shadow-none">
         <div className="receipt-print font-mono text-[12px] leading-snug">
           <div className="text-center">
             <p className="text-sm font-bold uppercase">{settings.storeName}</p>
@@ -130,12 +159,16 @@ export function ReceiptDialog({
           <Button variant="outline" className="flex-1" onClick={onClose}>
             <X className="size-4" /> Fechar
           </Button>
-          <Button className="flex-1" onClick={() => window.print()}>
+          <Button className="flex-1" onClick={() => window.print()} autoFocus>
             <Printer className="size-4" /> Imprimir
           </Button>
         </div>
+        <p className="mt-2 text-center text-[11px] text-zinc-500 print:hidden">
+          Ctrl+P ou F10 para imprimir · Esc para fechar
+        </p>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

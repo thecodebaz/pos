@@ -41,6 +41,9 @@ const ACTION_LABELS: Record<string, string> = {
   "supplier.created": "Fornecedor criado",
   "supplier.updated": "Fornecedor actualizado",
   "supplier.deleted": "Fornecedor eliminado",
+  "expense.created": "Saída de dinheiro registada",
+  "expense.updated": "Saída de dinheiro actualizada",
+  "expense.deleted": "Saída de dinheiro eliminada",
   "sale.completed": "Venda concluída",
   "sale.credit": "Venda a prazo registada",
   "sale.settlement": "Pagamento de venda a prazo regularizado",
@@ -78,7 +81,7 @@ export function AuditScreen() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [pageSize, setPageSize] = useState(String(DEFAULT_PAGE_SIZE));
   const [query, setQuery] = useState("");
-  const [range, setRange] = useState<DateRange>(() => getDateRangePreset("all"));
+  const [range, setRange] = useState<DateRange>(() => getDateRangePreset("thisWeek"));
   const [page, setPage] = useState(1);
 
   const actionMatches = useMemo(() => {

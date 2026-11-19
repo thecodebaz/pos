@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import {
   ChartColumn,
   DatabaseBackup,
+  Wallet,
   History,
   Lock,
   LogOut,
@@ -35,6 +36,7 @@ const navigation = [
   { href: "/stock/", label: "Stock", icon: Warehouse, roles: ["owner", "manager"] },
   { href: "/clientes/", label: "Clientes", icon: Users, roles: ["owner", "manager", "cashier"] },
   { href: "/fornecedores/", label: "Fornecedores", icon: Truck, roles: ["owner", "manager"] },
+  { href: "/despesas/", label: "Despesas", icon: Wallet, roles: ["owner", "manager"] },
   { href: "/relatorios/", label: "Relatórios", icon: ChartColumn, roles: ["owner", "manager"] },
   { href: "/auditoria/", label: "Auditoria", icon: History, roles: ["owner", "manager"] },
   { href: "/utilizadores/", label: "Utilizadores", icon: ShieldCheck, roles: ["owner"] },

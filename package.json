@@ -2,6 +2,7 @@
   "name": "pos",
   "version": "0.1.0",
   "private": true,
+  "main": "electron/main.cjs",
   "scripts": {
     "sync:sqlite": "node scripts/sync-sqlite.mjs",
     "worker:build": "tsc -p workers/tsconfig.json",
@@ -14,7 +15,12 @@
     "pm2:start": "pm2 startOrRestart ecosystem.config.cjs --update-env",
     "pm2:startup:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-pm2-startup.ps1",
     "typecheck": "tsc --noEmit && tsc -p workers/tsconfig.json --noEmit",
-    "lint": "eslint"
+    "lint": "eslint",
+    "electron:dev": "node scripts/electron-dev.cjs",
+    "electron:start": "electron .",
+    "electron:icon": "node scripts/make-electron-icon.mjs",
+    "electron:dir": "npm run build && npm run electron:icon && node scripts/build-electron.mjs --dir",
+    "electron:dist": "npm run build && npm run electron:icon && node scripts/build-electron.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
@@ -38,10 +44,64 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
+    "png-to-ico": "^3.0.2",
     "serwist": "^9.5.13",
     "tailwindcss": "4.3.3",
     "typescript": "^5"
+  },
+  "build": {
+    "appId": "mz.codebaz.pos",
+    "productName": "POS Codebaz",
+    "copyright": "Copyright © 2026 Codebaz",
+    "directories": {
+      "output": "dist-electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "out/**/*",
+      "icon.ico",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "artifactName": "POS-Codebaz-Instalador-${version}-${arch}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "POS Codebaz",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "POS-Codebaz-Portatil-${version}-${arch}.${ext}"
+    }
   }
 }

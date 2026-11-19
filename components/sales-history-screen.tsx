@@ -20,7 +20,7 @@ const PAGE_SIZE = 25;
 
 export function SalesHistoryScreen() {
   const { session, call, toast } = useApp();
-  const [range, setRange] = useState<DateRange>(() => getDateRangePreset("today"));
+  const [range, setRange] = useState<DateRange>(() => getDateRangePreset("thisWeek"));
   const [query, setQuery] = useState("");
   const [creditStatus, setCreditStatus] = useState<"all" | "pending" | "settled">("all");
   const [sales, setSales] = useState<SaleSummary[]>([]);

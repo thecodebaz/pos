@@ -77,19 +77,93 @@ Depois de abrir a aplicação, confirme `window.crossOriginIsolated === true` na
 - Instale a aplicação pelo menu do Chrome/Edge ("Instalar aplicação") para ter um ícone próprio e arranque em janela autónoma.
 - Actualizações do service worker são detectadas em segundo plano; quando houver uma nova versão, a aplicação mostra um aviso para recarregar.
 
+## Aplicação desktop (Electron)
+
+A mesma exportação estática (`out/`) também corre dentro do Electron. Não é uma PWA
+"embebida" a partir da internet: o Electron arranca um servidor local em
+`127.0.0.1:37842`, apenas para esta janela, com os cabeçalhos COOP/COEP que o
+SQLite WASM exige. O URL é fixo de propósito — OPFS é separado por origem e,
+se a porta mudasse, a base pareceria vazia ao abrir a aplicação seguinte.
+
+### Gerar os executáveis (Windows x64)
+
+```powershell
+npm install
+npm run electron:dist
+```
+
+Os ficheiros ficam em `dist-electron/`:
+
+- `POS-Codebaz-Instalador-0.1.0-x64.exe` — instalador NSIS (atalho, desinstalador, pasta escolhida pelo utilizador).
+- `POS-Codebaz-Portatil-0.1.0-x64.exe` — executa sem instalar; ideal para pen ou pasta partilhada.
+
+Para testar sem gerar instalador:
+
+```powershell
+npm run electron:dir        # pasta unpacked em dist-electron/win-unpacked
+.\dist-electron\win-unpacked\POS Codebaz.exe
+```
+
+Durante o desenvolvimento:
+
+```powershell
+npm run electron:dev         # arranca `next dev` e abre o Electron apontando para ele
+```
+
+Se a porta 37842 estiver ocupada por outro processo:
+
+```powershell
+$env:POS_ELECTRON_PORT=37843
+.\dist-electron\win-unpacked\POS Codebaz.exe
+```
+
+### Onde ficam os dados
+
+| Versão | Base OPFS + backups internos | Pasta visível em "Ajuda → Abrir pasta de dados" |
+|---|---|---|
+| Instalador | Perfil do Chromium do Electron | `%APPDATA%\POS Codebaz` |
+| Portátil | Perfil do Chromium do Electron | `POS Codebaz - dados`, ao lado do `.exe` portátil |
+
+Desinstalar a versão instalada **não apaga** `%APPDATA%\POS Codebaz`. Para apagar
+tudo, remova essa pasta manualmente depois de confirmar que tem backup.
+
+Ao exportar `.db` em `/backup/`, o Electron abre uma janela "Guardar backup" e
+coloca o ficheiro em `Backups`, dentro da pasta de dados.
+
+### Migrar da PWA (Chrome/Edge) para o desktop
+
+O Electron tem um perfil Chromium próprio: **não vê** a base OPFS guardada no
+Chrome/Edge. Para aproveitar os dados actuais:
+
+1. Na PWA actual, abra **Backup** e exporte o `.db`.
+2. Copie esse ficheiro para o computador onde vai usar o desktop.
+3. No desktop, abra **Backup**, escolha o ficheiro, introduza o PIN do
+   proprietário, marque a confirmação e importe.
+4. Confirme que as vendas, produtos e stock aparecem, e só depois continue a
+   usar a versão desktop como principal.
+
+O caminho inverso também funciona: exporte no desktop e importe na PWA.
+
+> O instalador não é assinado com certificado EV. No WindowsSmartScreen pode
+> aparecer um aviso na primeira execução; use "Mais informações → Executar
+> assim mesmo" apenas se o ficheiro vier de fonte confiável.
+
 ## Estrutura
 
 ```
 app/                 Rotas do App Router, layout, manifesto e service worker (sw.ts)
 components/          Ecrãs e componentes de UI
+electron/            Processo principal do Electron e servidor HTTP local
 lib/app-context.tsx  Arranque, sessão, bloqueio por inactividade, SW e toasts
 lib/db/protocol.ts   Contrato e tipos entre a UI e o worker
 lib/db/client.ts     Cliente tipado do worker
 workers/             Worker SQLite (schema, migrações, vendas, autenticação, backup)
 public/sqlite/       Distribuição do sqlite-wasm copiada no build
 public/workers/      Worker compilado
-scripts/             Sincronização, servidor estático, ícones, correcção RSC e PM2
+build/               Ícone Windows gerado por `npm run electron:icon`
+scripts/             Sincronização, servidor estático, ícones, empacotamento Electron, correcção RSC e PM2
 out/                 Export estático gerado por `npm run build`
+dist-electron/       Instalador, portátil e build unpacked (gerados)
 ```
 
 Toda a persistência passa pelo worker. As vendas são gravadas numa transacção `BEGIN IMMEDIATE … COMMIT`/`ROLLBACK`; os identificadores de negócio usam `crypto.randomUUID()`.

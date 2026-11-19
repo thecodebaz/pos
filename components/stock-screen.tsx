@@ -41,7 +41,7 @@ export function StockScreen() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [productPage, setProductPage] = useState(1);
   const [historyPage, setHistoryPage] = useState(1);
-  const [historyRange, setHistoryRange] = useState<DateRange>(() => getDateRangePreset("all"));
+  const [historyRange, setHistoryRange] = useState<DateRange>(() => getDateRangePreset("thisWeek"));
   const [loading, setLoading] = useState(true);
   const [importingFile, setImportingFile] = useState(false);
   const [query, setQuery] = useState("");

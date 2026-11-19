@@ -18,6 +18,28 @@ export const PAYMENT_LABELS = {
     transfer: "Transferência",
     other: "Outro",
 };
+export const EXPENSE_CATEGORIES = [
+    "compras",
+    "transporte",
+    "utilidades",
+    "salarios",
+    "aluguer",
+    "manutencao",
+    "impostos",
+    "marketing",
+    "outros",
+];
+export const EXPENSE_CATEGORY_LABELS = {
+    compras: "Compras e mercadorias",
+    transporte: "Transporte",
+    utilidades: "Luz, água e internet",
+    salarios: "Salários",
+    aluguer: "Aluguer",
+    manutencao: "Manutenção",
+    impostos: "Impostos e taxas",
+    marketing: "Marketing",
+    outros: "Outros",
+};
 export const ROLE_LABELS = {
     owner: "Proprietário",
     manager: "Gerente",

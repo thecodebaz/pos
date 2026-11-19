@@ -6,6 +6,8 @@ import type {
   BackupInfo,
   Category,
   Customer,
+  Expense,
+  ExpensePageResult,
   PaymentMethod,
   Product,
   Quote,
@@ -309,6 +311,28 @@ class DbClient {
 
   reportSummary(token: string, from: string, to: string): Promise<ReportSummary> {
     return this.request<ReportSummary>("report.summary", { from, to }, token);
+  }
+
+  listExpenses(
+    token: string,
+    payload: {
+      from?: string;
+      to?: string;
+      category?: string;
+      query?: string;
+      page?: number;
+      pageSize?: number;
+    } = {},
+  ): Promise<ExpensePageResult> {
+    return this.request<ExpensePageResult>("expense.page", payload, token);
+  }
+
+  upsertExpense(token: string, payload: Record<string, unknown>): Promise<Expense> {
+    return this.request<Expense>("expense.upsert", payload, token);
+  }
+
+  deleteExpense(token: string, id: string): Promise<{ id: string }> {
+    return this.request<{ id: string }>("expense.delete", { id }, token);
   }
 
   listAudit(token: string, limit = 200): Promise<AuditEntry[]> {

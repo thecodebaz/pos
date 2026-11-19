@@ -27,6 +27,7 @@
   --color-chart-2: var(--chart-2);
   --color-chart-1: var(--chart-1);
   --color-brand: var(--brand);
+  --color-expense: var(--expense);
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
@@ -72,6 +73,7 @@
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
   --brand: oklch(59.6% 0.145 163.225);
+  --expense: oklch(0.66 0.15 68);
   --chart-1: oklch(59.6% 0.145 163.225);
   --chart-2: oklch(69.6% 0.17 162.48);
   --chart-3: oklch(76.5% 0.177 163.223);
@@ -108,6 +110,7 @@
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
   --brand: oklch(69.6% 0.17 162.48);
+  --expense: oklch(0.78 0.15 75);
   --chart-1: oklch(76.5% 0.177 163.223);
   --chart-2: oklch(69.6% 0.17 162.48);
   --chart-3: oklch(59.6% 0.145 163.225);
@@ -137,21 +140,32 @@
 
 @media print {
   @page {
-    margin: 6mm;
+    size: 80mm auto;
+    margin: 0;
   }
-  body * {
-    visibility: hidden;
+  html,
+  body {
+    width: 80mm;
+    margin: 0;
+    padding: 0;
+    background: #fff;
   }
-  .receipt-print,
-  .receipt-print * {
-    visibility: visible;
+  /* O recibo é portado para o body: esconder os irmãos com display:none
+     evita que o layout da aplicação ocupe espaço e gere folhas vazias. */
+  body.printing-receipt > *:not(.receipt-print-root) {
+    display: none !important;
+  }
+  .receipt-print-root {
+    display: block !important;
   }
   .receipt-print {
-    position: absolute;
-    inset: 0 auto auto 0;
-    width: 72mm;
+    width: 76mm;
+    padding: 2mm;
     color: #000;
     background: #fff;
+  }
+  .receipt-print * {
+    color: #000;
   }
   .no-print {
     display: none !important;

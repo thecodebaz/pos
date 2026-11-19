@@ -28,6 +28,32 @@ export const PAYMENT_LABELS: Record<PaymentMethod, string> = {
   other: "Outro",
 };
 
+export const EXPENSE_CATEGORIES = [
+  "compras",
+  "transporte",
+  "utilidades",
+  "salarios",
+  "aluguer",
+  "manutencao",
+  "impostos",
+  "marketing",
+  "outros",
+] as const;
+
+export type ExpenseCategory = (typeof EXPENSE_CATEGORIES)[number];
+
+export const EXPENSE_CATEGORY_LABELS: Record<ExpenseCategory, string> = {
+  compras: "Compras e mercadorias",
+  transporte: "Transporte",
+  utilidades: "Luz, água e internet",
+  salarios: "Salários",
+  aluguer: "Aluguer",
+  manutencao: "Manutenção",
+  impostos: "Impostos e taxas",
+  marketing: "Marketing",
+  outros: "Outros",
+};
+
 export const ROLE_LABELS: Record<Role, string> = {
   owner: "Proprietário",
   manager: "Gerente",
@@ -349,6 +375,30 @@ export interface SaleSummary {
   itemCount: number;
 }
 
+/** Saída de dinheiro: despesa ou qualquer outra finalidade. */
+export interface Expense {
+  id: string;
+  category: ExpenseCategory;
+  description: string;
+  amountCents: number;
+  method: PaymentMethod;
+  reference: string | null;
+  note: string | null;
+  /** ISO em hora de Maputo, correspondente ao dia da saída. */
+  spentAt: string;
+  createdAt: string;
+  userName: string | null;
+}
+
+export interface ExpensePageResult {
+  items: Expense[];
+  page: number;
+  pageSize: number;
+  total: number;
+  /** Soma de todas as saídas do filtro, não apenas da página actual. */
+  totalCents: number;
+}
+
 export interface ReportSummary {
   from: string;
   to: string;
@@ -362,6 +412,12 @@ export interface ReportSummary {
   creditTotalCents: number;
   creditOutstandingCents: number;
   byMethod: { method: PaymentMethod; amountCents: number; count: number }[];
+  expenseCount: number;
+  expenseTotalCents: number;
+  /** Vendas do período menos saídas de dinheiro do período. */
+  netResultCents: number;
+  expensesByCategory: { category: ExpenseCategory; amountCents: number; count: number }[];
+  dailyExpenses: { date: string; totalCents: number; count: number }[];
   topProducts: { name: string; qtyMilli: number; totalCents: number }[];
   dailySales: { date: string; totalCents: number; count: number }[];
   lowStock: Product[];
@@ -432,6 +488,9 @@ export type RequestType =
   | "sale.void"
   | "sale.settle"
   | "report.summary"
+  | "expense.page"
+  | "expense.upsert"
+  | "expense.delete"
   | "audit.list"
   | "audit.page"
   | "backup.export"

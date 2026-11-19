@@ -18,7 +18,9 @@
 /out/
 
 # production
-/build
+/build/*
+!build/icon.ico
+/dist-electron/
 
 # misc
 .DS_Store

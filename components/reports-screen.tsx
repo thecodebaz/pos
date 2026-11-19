@@ -4,8 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Download, RefreshCw } from "lucide-react";
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { useApp, errorMessage } from "@/lib/app-context";
-import type { Product, ReportSummary, SaleSummary } from "@/lib/db/protocol";
-import { PAYMENT_LABELS } from "@/lib/db/protocol";
+import type { ExpenseCategory, Product, ReportSummary, SaleSummary } from "@/lib/db/protocol";
+import { EXPENSE_CATEGORY_LABELS, PAYMENT_LABELS } from "@/lib/db/protocol";
 import { formatDate, formatMzn, formatQty, maputoDayFromInput } from "@/lib/format";
 import { getDateRangePreset, type DateRange } from "@/lib/date-range";
 import {
@@ -36,6 +36,15 @@ const productChartConfig = {
   totalCents: { label: "Valor vendido", color: "var(--color-brand)" },
 } satisfies ChartConfig;
 
+const cashChartConfig = {
+  entradasCents: { label: "Entradas (vendas)", color: "var(--color-brand)" },
+  saidasCents: { label: "Saídas", color: "var(--color-expense)" },
+} satisfies ChartConfig;
+
+const expenseChartConfig = {
+  amountCents: { label: "Valor saído", color: "var(--color-expense)" },
+} satisfies ChartConfig;
+
 function moneyTooltip(value: unknown, name: unknown) {
   return (
     <div className="flex w-full items-center justify-between gap-3">
@@ -47,7 +56,7 @@ function moneyTooltip(value: unknown, name: unknown) {
 
 export function ReportsScreen() {
   const { call, toast } = useApp();
-  const [range, setRange] = useState<DateRange>(() => getDateRangePreset("today"));
+  const [range, setRange] = useState<DateRange>(() => getDateRangePreset("thisWeek"));
   const [summary, setSummary] = useState<ReportSummary | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
@@ -122,6 +131,23 @@ export function ReportsScreen() {
     () => bucketSales(summary?.dailySales ?? [], range.from, range.to),
     [summary, range.from, range.to],
   );
+  const expenseData = useMemo(
+    () => bucketSales(summary?.dailyExpenses ?? [], range.from, range.to),
+    [summary, range.from, range.to],
+  );
+  const cashData = useMemo(() => {
+    const base = salesData.length > 0 ? salesData : expenseData;
+    return base.map((point, index) => ({
+      label: point.label,
+      entradasCents: salesData[index]?.totalCents ?? 0,
+      saidasCents: expenseData[index]?.totalCents ?? 0,
+    }));
+  }, [salesData, expenseData]);
+  const expenseCategoryData = (summary?.expensesByCategory ?? []).map((row) => ({
+    label: EXPENSE_CATEGORY_LABELS[row.category as ExpenseCategory] ?? row.category,
+    amountCents: row.amountCents,
+    count: row.count,
+  }));
   const methodData = (summary?.byMethod ?? []).map((row) => ({
     label: PAYMENT_LABELS[row.method],
     amountCents: row.amountCents,
@@ -138,7 +164,7 @@ export function ReportsScreen() {
     <div>
       <PageHeader
         title="Relatórios"
-        description="Resumo do período, gráficos de vendas, meios de pagamento, produtos mais vendidos e stock."
+        description="Resumo do período: vendas, saídas de dinheiro, resultado líquido, meios de pagamento, produtos e stock."
         actions={
           <>
             <Button variant="outline" onClick={() => void exportCsv()}>
@@ -187,6 +213,43 @@ export function ReportsScreen() {
               hint="Por regularizar no período"
             />
           </div>
+
+          <div className="grid gap-2 sm:grid-cols-3">
+            <StatCard
+              label="Despesas e saídas"
+              value={formatMzn(summary.expenseTotalCents)}
+              hint={`${summary.expenseCount} registo(s) no período`}
+            />
+            <StatCard
+              label="Resultado líquido"
+              value={formatMzn(summary.netResultCents)}
+              hint="Vendas menos saídas do período"
+            />
+            <StatCard
+              label="Peso das saídas"
+              value={`${summary.totalCents > 0 ? Math.round((summary.expenseTotalCents / summary.totalCents) * 100) : 0}%`}
+              hint="Das vendas do período"
+            />
+          </div>
+
+          {cashData.length > 0 ? (
+            <div className="rounded-xl bg-card ring-1 ring-foreground/10">
+              <div className="flex items-center justify-between border-b px-3 py-2">
+                <p className="text-sm font-medium">Entradas vs saídas</p>
+                <Badge tone="neutral">{SALES_GRANULARITY_LABEL[granularity]}</Badge>
+              </div>
+              <ChartContainer config={cashChartConfig} className="h-64 w-full px-2 pb-2">
+                <BarChart data={cashData} margin={{ top: 12, right: 8, left: 0, bottom: 0 }}>
+                  <CartesianGrid vertical={false} />
+                  <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} />
+                  <YAxis width={78} tickLine={false} axisLine={false} tickFormatter={(value: number) => formatMzn(value)} />
+                  <ChartTooltip cursor={false} content={<ChartTooltipContent formatter={moneyTooltip} />} />
+                  <Bar dataKey="entradasCents" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="saidasCents" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ChartContainer>
+            </div>
+          ) : null}
 
           {salesData.length > 0 ? (
             <div className="rounded-xl bg-card ring-1 ring-foreground/10">
@@ -287,6 +350,43 @@ export function ReportsScreen() {
                 </>
               )}
             </div>
+          </div>
+
+          <div className="rounded-xl bg-card ring-1 ring-foreground/10">
+            <p className="border-b px-3 py-2 text-sm font-medium">Despesas por categoria</p>
+            {expenseCategoryData.length === 0 ? (
+              <p className="px-3 py-6 text-sm text-muted-foreground">Sem saídas de dinheiro no período.</p>
+            ) : (
+              <>
+                <ChartContainer config={expenseChartConfig} className="h-64 w-full px-2 pt-3">
+                  <BarChart data={expenseCategoryData} layout="vertical" margin={{ top: 8, right: 24, left: 8, bottom: 0 }}>
+                    <CartesianGrid horizontal={false} />
+                    <XAxis type="number" tickLine={false} axisLine={false} tickFormatter={(value: number) => formatMzn(value)} />
+                    <YAxis type="category" dataKey="label" width={150} tickLine={false} axisLine={false} />
+                    <ChartTooltip cursor={false} content={<ChartTooltipContent formatter={moneyTooltip} />} />
+                    <Bar dataKey="amountCents" fill="var(--color-amountCents)" radius={[0, 4, 4, 0]} />
+                  </BarChart>
+                </ChartContainer>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Categoria</TableHead>
+                      <TableHead className="text-right">Registos</TableHead>
+                      <TableHead className="text-right">Total</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {summary.expensesByCategory.map((row) => (
+                      <TableRow key={row.category}>
+                        <TableCell>{EXPENSE_CATEGORY_LABELS[row.category] ?? row.category}</TableCell>
+                        <TableCell className="text-right tabular-nums">{row.count}</TableCell>
+                        <TableCell className="text-right font-medium tabular-nums">{formatMzn(row.amountCents)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </>
+            )}
           </div>
 
           <div className="grid gap-2 sm:grid-cols-2">

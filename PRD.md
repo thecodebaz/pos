@@ -531,13 +531,28 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-REL-05 | Intervalo de datas humanizado (hoje, ontem, 7/30 dias, semana, mês, todo o período) com intervalo personalizado no calendário, em hora de Maputo. | S |
 | RF-REL-11 | Gráficos no relatório: evolução diária/semanal/mensal das vendas, meios de pagamento e produtos mais vendidos, mantendo as tabelas detalhadas. | S |
 | RF-REL-12 | Indicadores de vendas a prazo e crédito em aberto no período. | M |
+| RF-REL-13 | Indicadores de despesas/saídas, resultado líquido (vendas menos saídas) e peso das saídas nas vendas do período. | M |
+| RF-REL-14 | Gráficos de entradas vs saídas e de despesas por categoria, com tabela detalhada. | M |
 | RF-REL-06 | Total de IVA por período. | M |
 | RF-REL-07 | Vendas por operador. | S |
 | RF-REL-08 | Exportação CSV de vendas/stock. | C |
 | RF-REL-09 | Relatório de lucro/margem (custo incompleto no MVP). | W |
 | RF-REL-10 | Todos os relatórios são calculados localmente, sem chamadas de rede. | M |
 
-### 9.12 Auditoria
+> Por omissão, todos os filtros temporais da aplicação (vendas, relatórios, auditoria, histórico de stock e saídas de dinheiro) abrem com **Esta semana** — de segunda-feira até hoje, em hora de Maputo. O utilizador pode escolher qualquer outro intervalo predefinido ou personalizado.
+
+### 9.12 Saídas de dinheiro
+
+| ID | Requisito | Prioridade |
+|---|---|---|
+| RF-SAI-01 | Registar saídas de dinheiro com categoria, descrição livre, valor, método, data, referência e nota. | M |
+| RF-SAI-02 | Categorias predefinidas: compras, transporte, utilidades, salários, aluguer, manutenção, impostos, marketing e outros. | M |
+| RF-SAI-03 | Lista com filtro temporal humanizado, filtro por categoria, pesquisa por descrição/referência, paginação e exportação CSV. | M |
+| RF-SAI-04 | Criar, editar e eliminar saídas (eliminação lógica), com registo de auditoria. | M |
+| RF-SAI-05 | Apenas proprietário e gerente podem registar ou alterar saídas; todos os papéis podem consultar. | M |
+| RF-SAI-06 | As saídas não alteram stock; compras de mercadorias exigem entrada de stock separada. | M |
+
+### 9.13 Auditoria
 
 | ID | Requisito | Prioridade |
 |---|---|---|
@@ -549,7 +564,7 @@ Legenda de prioridade: **M** = Must, **S** = Should, **C** = Could, **W** = Won'
 | RF-AUD-06 | A UI não permite editar/apagar eventos de auditoria. | M |
 | RF-AUD-07 | A app avisa que a auditoria local não é à prova de adulteração por quem controla o dispositivo. | S |
 
-### 9.13 Backup, exportação e importação
+### 9.14 Backup, exportação e importação
 
 | ID | Requisito | Prioridade |
 |---|---|---|
@@ -861,6 +876,7 @@ Comandos mínimos:
 - `sale.complete`, `sale.void`, `sale.list`, `sale.get`, `sale.reprint`
 - `approval.request`, `approval.consume`
 - `report.summary`, `report.range`, `report.lowStock`
+- `expense.page`, `expense.upsert`, `expense.delete`
 - `audit.list`
 - `backup.export`, `backup.import`, `backup.auto`, `backup.info`
 - `settings.get`, `settings.update`
@@ -1034,9 +1050,11 @@ public/
 | `customers` | `id`, `name`, `phone`, `phone_normalized`, `alt_phone`, `nif`, `email`, `address`, `notes`, `created_at`, `updated_at`, `deleted_at` |  |
 | `suppliers` | `id`, `name`, `contact_name`, `phone`, `nif`, `email`, `address`, `notes`, `active`, `created_at`, `updated_at`, `deleted_at` |  |
 | `stock_movements` | `id`, `product_id`, `type`, `qty_milli`, `balance_after_milli`, `unit_cost_cents`, `supplier_id`, `supplier_name_snapshot`, `document_ref`, `reason`, `sale_id`, `user_id`, `created_at` | `qty_milli <> 0`; tipos enumerados |
-| `sales` | `id`, `receipt_number UNIQUE`, `status`, `cashier_id`, `cashier_name_snapshot`, `customer_id`, `customer_name_snapshot`, `customer_nif_snapshot`, `subtotal_cents`, `discount_cents`, `tax_cents`, `tax_applied`, `total_cents`, `paid_cents`, `change_cents`, `note`, `created_at`, `voided_at`, `voided_by`, `void_reason` | `tax_applied` é snapshot da escolha na venda; `status IN ('completed','voided')` |
+| `sales` | `id`, `receipt_number UNIQUE`, `status`, `cashier_id`, `cashier_name_snapshot`, `customer_id`, `customer_name_snapshot`, `customer_nif_snapshot`, `subtotal_cents`, `discount_cents`, `tax_cents`, `tax_applied`, `total_cents`, `paid_cents`, `change_cents`, `is_credit`, `note`, `created_at`, `voided_at`, `voided_by`, `void_reason` | `tax_applied` é snapshot da escolha na venda; `status IN ('completed','voided')` |
 | `sale_items` | `id`, `sale_id`, `product_id`, `name_snapshot`, `sku_snapshot`, `barcode_snapshot`, `unit`, `sale_unit`, `unit_price_cents`, `sale_qty_milli`, `qty_milli`, `gross_cents`, `line_discount_cents`, `order_discount_cents`, `tax_rate_bp`, `base_cents`, `tax_cents`, `total_cents` | `sale_unit`, preço e quantidade vendida são snapshots; `qty_milli` é a quantidade na unidade-base retirada do stock |
 | `sale_payments` | `id`, `sale_id`, `method`, `amount_cents`, `tendered_cents`, `reference`, `created_at` | `method IN ('cash','card','pos','mpesa','emola','transfer','other')` |
+| `sale_settlements` | `id`, `sale_id`, `amount_cents`, `method`, `reference`, `note`, `user_id`, `created_at` | Regularizações de crédito; não entram no mix de pagamentos |
+| `expenses` | `id`, `category`, `description`, `search_text`, `amount_cents`, `method`, `reference`, `note`, `spent_at`, `user_id`, `created_at`, `updated_at`, `deleted_at` | `amount_cents > 0`; categorias e métodos enumerados; `spent_at` em ISO de Maputo |
 | `approvals` | `id`, `action`, `entity_type`, `entity_id`, `amount_cents`, `requested_by`, `approver_id`, `created_at`, `expires_at`, `used_at`, `metadata_json` | Token opaco devolvido à UI; uso único |
 | `audit_log` | `id`, `actor_id`, `action`, `entity_type`, `entity_id`, `before_json`, `after_json`, `created_at`, `device_info` | Sem PIN/hash |
 | `counters` | `name TEXT PK`, `value INTEGER NOT NULL` | `receipt_seq` |
@@ -1065,6 +1083,8 @@ CREATE INDEX idx_stock_product_date ON stock_movements(product_id, created_at);
 CREATE INDEX idx_stock_sale ON stock_movements(sale_id);
 CREATE INDEX idx_audit_created ON audit_log(created_at);
 CREATE INDEX idx_audit_actor ON audit_log(actor_id);
+CREATE INDEX idx_expenses_spent ON expenses(spent_at);
+CREATE INDEX idx_expenses_search ON expenses(search_text);
 CREATE INDEX idx_approvals_pending ON approvals(expires_at, used_at);
 ```
 
@@ -1255,7 +1275,7 @@ Sem servidor, **o `.db` do OPFS é a única cópia dos dados**. Limpar os dados 
 | `F8` | Cliente |
 | `Esc` | Fechar modal / limpar pesquisa |
 | `Enter` | Confirmar |
-| `Ctrl+P` | Imprimir recibo |
+| `Ctrl+P` / `F10` | Imprimir recibo (também com `Enter` no botão focado) |
 | `Ctrl+L` | Bloquear sessão |
 | `Delete` | Remover linha selecionada (com confirmação) |
 
@@ -1303,7 +1323,7 @@ Documento não fiscal.
 ```
 
 - Largura 80 mm; fonte monoespaçada; margens mínimas.
-- `@media print` remove navegação, botões e cabeçalhos.
+- `@media print` isola o recibo num portal no `body` e esconde os restantes elementos com `display: none`, evitando folhas em branco; remove navegação, botões e cabeçalhos.
 - Reimpressão: “2.ª via”.
 - Anulada: marca de água “ANULADO” + motivo.
 
